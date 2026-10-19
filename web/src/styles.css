@@ -220,12 +220,14 @@ table.members { width: 100%; border-collapse: collapse; }
 .save-status.error { color: var(--margin); }
 .save-status.saved::before { content: '✓ '; color: var(--ok); }
 
-.modules { display: grid; gap: 4px; }
-.module { position: relative; padding: 6px 0; }
+/* La cuadrícula de módulos (react-grid-layout posiciona cada .module) */
+.modules-frame { width: 100%; }
+.module { position: relative; }
+.module-body { padding: 6px 0; } /* alto natural del contenido: es lo que se mide */
 .module input, .module textarea { background: transparent; border-color: transparent; padding: 4px 6px; }
 .module input:hover, .module textarea:hover { border-color: var(--rule); }
 .module input:focus, .module textarea:focus { background: rgba(255, 255, 255, 0.92); border-color: var(--ink-soft); outline: none; }
-.module textarea { field-sizing: content; min-height: calc(var(--step) * 2); resize: none; line-height: var(--step); }
+.module textarea { field-sizing: content; min-height: calc(var(--step) * 2); resize: none; line-height: var(--step); overflow-y: hidden; }
 .in-heading { font: 700 1.375rem/1.3 var(--font); }
 .in-code { background: #f3f6fa; border-left: 3px solid var(--ink); }
 .in-code .lang { font: 0.75rem var(--mono); color: var(--ink-soft); width: 140px; }
@@ -265,7 +267,9 @@ table.members { width: 100%; border-collapse: collapse; }
   position: absolute;
   right: 0;
   top: -14px;
+  z-index: 2;
   display: flex;
+  align-items: center;
   gap: 4px;
   opacity: 0;
   pointer-events: none;
@@ -273,7 +277,71 @@ table.members { width: 100%; border-collapse: collapse; }
 .module:hover .module-tools, .module:focus-within .module-tools { opacity: 1; pointer-events: auto; }
 .module-tools button { font-size: 0.8125rem; padding: 2px 8px; }
 .module-tools .share { background: var(--highlight); border-color: #d9be2a; font-weight: 500; }
+/* Asa de arrastre: un span (no un botón), porque los botones están en `cancel` */
+.module-drag {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  padding: 2px 6px;
+  font-size: 0.9375rem;
+  line-height: 1.3;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.module-drag:hover { color: var(--ink); border-color: var(--ink); }
+.react-draggable-dragging .module-drag { cursor: grabbing; }
 @media (hover: none) { .module-tools { position: static; opacity: 1; pointer-events: auto; margin-top: 4px; } }
+
+/* react-grid-layout: el alto crece al escribir, así que no se anima (iría un paso detrás del texto) */
+.modules.react-grid-layout { transition: none; }
+.react-grid-item { transition-property: left, top, width; }
+.react-grid-item.cssTransforms { transition-property: transform, width; }
+@media (prefers-reduced-motion: reduce) { .react-grid-item, .react-grid-item.cssTransforms { transition: none; } }
+.react-grid-item.react-grid-placeholder {
+  background: var(--rule);
+  opacity: 0.45;
+  border: 1px dashed var(--ink-soft);
+  border-radius: var(--radius);
+}
+.react-grid-item > .react-resizable-handle::after { border-color: var(--ink-soft); }
+.react-grid-item > .react-resizable-handle:hover::after { border-color: var(--ink); }
+@media (hover: none) { .react-grid-item > .react-resizable-handle { opacity: 1; } }
+
+/* Solo lectura: velo esmerilado leve bajo el texto, borde punteado y candado en el encabezado */
+.sheet.readonly { isolation: isolate; border: 2px dotted var(--ink-soft); }
+.sheet.readonly::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.35);
+  backdrop-filter: blur(1.5px);
+  -webkit-backdrop-filter: blur(1.5px);
+}
+.sheet.readonly .sheet-head, .sheet.readonly .modules, .sheet.readonly .empty-note { position: relative; z-index: 1; }
+@media (prefers-reduced-transparency: reduce) { .sheet.readonly::after { display: none; } }
+.sheet .readonly-notice {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 3;
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  background: var(--surface);
+  border: 1px solid var(--ink-soft);
+  border-left: 4px solid var(--highlight);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgba(27, 42, 65, 0.12);
+}
+.sheet .readonly-notice:empty { opacity: 0; padding: 0; border: 0; box-shadow: none; pointer-events: none; }
 
 .add-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: var(--step); }
 .add-bar button { font-size: 0.875rem; background: rgba(255, 255, 255, 0.9); }

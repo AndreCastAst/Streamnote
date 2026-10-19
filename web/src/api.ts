@@ -8,12 +8,20 @@ export interface User {
 }
 
 export type ModuleType = 'text' | 'heading' | 'code' | 'checklist' | 'quote';
+// Acomodo en la cuadrícula de 12 columnas, en unidades de cuadrícula
+export interface ModuleLayout {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 export interface NoteModule {
   id: string;
   type: ModuleType;
   content: any;
   sourceModuleId?: string | null;
   sourceAuthor?: string | null;
+  layout?: ModuleLayout;
 }
 
 export class ApiError extends Error {
