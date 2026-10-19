@@ -1,0 +1,42 @@
+{
+  "name": "streamnote-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:api": "tsx watch src/entrypoints/server.ts",
+    "dev:worker": "tsx watch src/entrypoints/worker.ts",
+    "start:api": "tsx src/entrypoints/server.ts",
+    "start:worker": "tsx src/entrypoints/worker.ts",
+    "migrate": "tsx src/entrypoints/migrate.ts",
+    "bootstrap:local": "tsx src/entrypoints/bootstrap-local.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "typecheck": "tsc --noEmit",
+    "build:lambda": "esbuild src/entrypoints/lambda.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/lambda/index.mjs --external:@aws-sdk/* --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1152.0",
+    "@aws-sdk/client-eventbridge": "^3.1152.0",
+    "@aws-sdk/client-rds-data": "^3.1152.0",
+    "@aws-sdk/client-s3": "^3.1152.0",
+    "@aws-sdk/client-scheduler": "^3.1152.0",
+    "@aws-sdk/client-sqs": "^3.1152.0",
+    "@aws-sdk/lib-dynamodb": "^3.1152.0",
+    "@aws-sdk/s3-request-presigner": "^3.1152.0",
+    "@fastify/cors": "^11.3.1",
+    "@fastify/websocket": "^11.3.4",
+    "fastify": "^5.12.7",
+    "jose": "^6.2.12",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "ws": "^8.22.0"
+  }
+}

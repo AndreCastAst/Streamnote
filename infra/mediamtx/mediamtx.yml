@@ -1,0 +1,46 @@
+# MediaMTX: reemplazo local de Amazon IVS.
+# Recibe WebRTC (WHIP) del navegador del anfitrión, lo reparte por WebRTC (WHEP) y HLS,
+# y graba cada directo en /recordings/<path>. Cada petición de emitir o ver se valida
+# contra la API (/internal/media/auth) con un token firmado, como el token de reproducción de IVS.
+logLevel: info
+
+authMethod: http
+authHTTPAddress: http://api:4000/internal/media/auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+
+api: true
+apiAddress: :9997
+
+# Protocolos que no se usan
+rtsp: false
+rtmp: false
+srt: false
+playback: false
+moq: false
+
+hls: true
+hlsAddress: :8888
+hlsAllowOrigins: ["*"]
+
+webrtc: true
+webrtcAddress: :8889
+webrtcAllowOrigins: ["*"]
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+# Con Docker Desktop el navegador no ve la IP del contenedor: se anuncia 127.0.0.1
+webrtcAdditionalHosts: [127.0.0.1]
+
+pathDefaults:
+  record: true
+  recordPath: /recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordSegmentDuration: 1h
+  # El worker borra los segmentos después de subir la grabación a S3
+  recordDeleteAfter: 0s
+
+paths:
+  # Solo se aceptan rutas creadas por la API: s_<id del directo sin guiones>
+  "~^s_[0-9a-f]{32}$": {}

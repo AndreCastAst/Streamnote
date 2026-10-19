@@ -1,0 +1,144 @@
+// Prueba de humo de la API completa (sin video). Requiere API, worker, PostgreSQL y moto en marcha.
+//   npm run smoke            (API en http://localhost:4000)
+//   API_URL=http://... npm run smoke
+import { randomUUID } from 'node:crypto';
+import WebSocket from 'ws';
+
+const API = process.env.API_URL ?? 'http://localhost:4000';
+let failures = 0;
+const ok = (cond: unknown, msg: string) => {
+  console.log(`${cond ? '✔' : '✘'} ${msg}`);
+  if (!cond) failures++;
+};
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function call(token: string | null, method: string, path: string, body?: unknown) {
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+async function until<T>(fn: () => Promise<T>, check: (v: T) => boolean, ms = 15000): Promise<T> {
+  const end = Date.now() + ms;
+  let v = await fn();
+  while (!check(v) && Date.now() < end) {
+    await sleep(300);
+    v = await fn();
+  }
+  return v;
+}
+
+async function login(email: string, name: string) {
+  const r = await call(null, 'POST', '/auth/dev-login', { email, name });
+  return r.body as { token: string; user: { id: string } };
+}
+
+const run = randomUUID().slice(0, 6);
+const ana = await login(`ana-${run}@upao.edu.pe`, 'Ana Docente');
+const beto = await login(`beto-${run}@upao.edu.pe`, 'Beto Alumno');
+ok(ana.token && beto.token, 'inicio de sesión local de dos usuarios');
+ok((await call(null, 'GET', '/communities')).status === 401, 'sin token → 401');
+
+// Tiempo real de Beto
+const inbox: any[] = [];
+const ws = new WebSocket(`${API.replace('http', 'ws')}/ws?token=${beto.token}`);
+ws.on('message', (raw) => inbox.push(JSON.parse(raw.toString())));
+await new Promise((r) => ws.on('open', r));
+
+// ---- Comunidades y permisos ----
+const c = (await call(ana.token, 'POST', '/communities', { name: `Cálculo II ${run}`, visibility: 'private' })).body;
+ok(c.id && c.invite_code, 'Ana crea una comunidad privada');
+ok((await call(beto.token, 'POST', `/communities/${c.id}/join`)).status === 403, 'una privada no admite unirse sin código');
+ok((await call(beto.token, 'GET', `/communities/${c.id}`)).status === 403, 'Beto no ve la comunidad privada');
+ok((await call(beto.token, 'POST', '/communities/join-by-code', { code: c.invite_code })).status === 200, 'Beto se une con el código');
+const detail = (await call(beto.token, 'GET', `/communities/${c.id}`)).body;
+ok(detail.members.length === 2 && detail.inviteCode === undefined, 'Beto ve a los miembros pero no el código de invitación');
+
+ok((await call(beto.token, 'POST', `/communities/${c.id}/streams`, { title: 'Repaso' })).status === 403, 'Beto no puede transmitir sin permiso');
+ok((await call(beto.token, 'POST', `/communities/${c.id}/stream-permission-requests`)).status === 202, 'Beto pide permiso para transmitir');
+const anaNotes = await until(() => call(ana.token, 'GET', '/notifications'), (r) => r.body.some((n: any) => n.type === 'StreamPermissionRequested'));
+ok(anaNotes.body.some((n: any) => n.type === 'StreamPermissionRequested'), 'Ana recibe la solicitud (EventBridge → SQS → worker → DynamoDB)');
+ok((await call(beto.token, 'PATCH', `/communities/${c.id}/members/${beto.user.id}`, { canStream: true })).status === 403, 'Beto no puede darse permiso a sí mismo');
+const granted = await call(ana.token, 'PATCH', `/communities/${c.id}/members/${beto.user.id}`, { canStream: true });
+ok(granted.body.can_stream === true, 'Ana le da permiso para transmitir');
+await until(async () => inbox, (m) => m.some((x) => x.data?.type === 'MemberPermissionsChanged'));
+ok(inbox.some((x) => x.type === 'notification' && x.data.type === 'MemberPermissionsChanged'), 'Beto recibe el aviso en tiempo real por WebSocket');
+
+// ---- Notas modulares con autoguardado por cola ----
+const note = (await call(beto.token, 'POST', '/notes', { title: 'Integrales' })).body;
+const modules = [
+  { id: randomUUID(), type: 'heading', content: { text: 'Integración por partes', level: 1 } },
+  { id: randomUUID(), type: 'text', content: { text: '∫u dv = uv − ∫v du' } },
+  { id: randomUUID(), type: 'checklist', content: { items: [{ text: 'Ejercicio 3', done: false }] } },
+];
+const save = await call(beto.token, 'PUT', `/notes/${note.id}`, { opId: randomUUID(), version: 3, title: 'Integrales', modules });
+ok(save.status === 202, 'autoguardado responde 202 de inmediato');
+const saved = await until(() => call(beto.token, 'GET', `/notes/${note.id}`), (r) => r.body.version === 3);
+ok(saved.body.version === 3 && saved.body.modules.length === 3, 'el worker aplicó la versión 3 con 3 módulos');
+const dupOp = randomUUID();
+await call(beto.token, 'PUT', `/notes/${note.id}`, { opId: dupOp, version: 2, title: 'VIEJA', modules: [] });
+await sleep(1500);
+ok((await call(beto.token, 'GET', `/notes/${note.id}`)).body.title === 'Integrales', 'una versión vieja que llega tarde se descarta');
+await call(beto.token, 'PUT', `/notes/${note.id}`, { opId: dupOp, version: 9, title: 'DUPLICADA', modules: [] });
+await sleep(1500);
+ok((await call(beto.token, 'GET', `/notes/${note.id}`)).body.title === 'Integrales', 'un opId repetido no se aplica dos veces');
+ok((await call(ana.token, 'GET', `/notes/${note.id}`)).status === 403, 'Ana no ve la nota antes de compartirla');
+ok((await call(ana.token, 'PUT', `/notes/${note.id}`, { opId: randomUUID(), version: 10, title: 'x', modules: [] })).status === 403, 'Ana no puede editar la nota de Beto');
+await call(beto.token, 'POST', `/notes/${note.id}/shares`, { communityId: c.id });
+const shared = (await call(ana.token, 'GET', `/communities/${c.id}/notes`)).body;
+ok(shared.length === 1 && shared[0].modules === 3, 'la nota aparece en la comunidad');
+const view = (await call(ana.token, 'GET', `/notes/${note.id}`)).body;
+ok(view.canEdit === false && view.modules.length === 3, 'Ana la lee sin poder editarla');
+const copy = (await call(ana.token, 'POST', `/notes/${note.id}/copy`)).body;
+const copied = (await call(ana.token, 'GET', `/notes/${copy.id}`)).body;
+ok(copied.canEdit && copied.modules[1].sourceAuthor === 'Beto Alumno', 'Ana copia la nota; cada módulo recuerda su autor');
+
+// ---- Directo: módulos compartidos y chat ----
+const stream = (await call(beto.token, 'POST', `/communities/${c.id}/streams`, { title: 'Repaso de integrales' })).body;
+ok(stream.id, 'Beto inicia un directo con el permiso concedido');
+ok((await call(beto.token, 'POST', `/communities/${c.id}/streams`, { title: 'Otro' })).status === 409, 'no puede abrir dos directos a la vez');
+const sAna = (await call(ana.token, 'GET', `/streams/${stream.id}`)).body;
+const sBeto = (await call(beto.token, 'GET', `/streams/${stream.id}`)).body;
+ok(sBeto.publishUrl && !sAna.publishUrl && sAna.playback.webrtc, 'solo el anfitrión recibe URL de emisión; Ana recibe URL de reproducción');
+
+const pathName = new URL(sBeto.publishUrl).pathname.split('/')[1];
+const pubToken = new URL(sBeto.publishUrl).searchParams.get('token');
+const readToken = new URL(sAna.playback.webrtc).searchParams.get('token');
+const auth = (action: string, token: string | null, path = pathName) =>
+  call(null, 'POST', '/internal/media/auth', { action, path, query: token ? `token=${token}` : '' });
+ok((await auth('publish', pubToken)).status === 200, 'el servidor de video deja emitir con el token del anfitrión');
+ok((await auth('publish', readToken)).status === 401, 'un token de espectador no permite emitir');
+ok((await auth('read', readToken)).status === 200, 'el token de espectador permite ver');
+ok((await auth('read', readToken, 's_00000000000000000000000000000000')).status === 401, 'un token no sirve para otro directo');
+ok((await auth('read', null)).status === 401, 'sin token no se puede ver');
+
+ws.send(JSON.stringify({ type: 'subscribe', channel: `stream:${stream.id}` }));
+await until(async () => inbox, (m) => m.some((x) => x.type === 'subscribed'));
+const mod = await call(ana.token, 'POST', `/streams/${stream.id}/modules`, { type: 'code', content: { code: 'print(42)', language: 'python' } });
+ok(mod.status === 201, 'Ana comparte un módulo en el directo');
+await until(async () => inbox, (m) => m.some((x) => x.type === 'module.shared'));
+ok(inbox.some((x) => x.type === 'module.shared' && x.data.sharedBy.name === 'Ana Docente'), 'Beto recibe el módulo en tiempo real');
+await call(ana.token, 'POST', `/streams/${stream.id}/chat`, { text: '¿Se ve bien?' });
+await until(async () => inbox, (m) => m.some((x) => x.type === 'chat.message'));
+ok(inbox.some((x) => x.type === 'chat.message'), 'el chat llega en tiempo real');
+ok((await call(ana.token, 'GET', `/streams/${stream.id}/modules`)).body.length === 1, 'los módulos compartidos quedan en la sesión');
+ok((await call(beto.token, 'POST', `/streams/${stream.id}/end`)).status === 200, 'Beto termina el directo');
+ok((await auth('publish', pubToken)).status === 401, 'tras terminar ya no se puede volver a emitir');
+
+// ---- Recordatorios ----
+const rem = await call(beto.token, 'POST', '/reminders', { title: 'Repasar integrales', fireAt: new Date(Date.now() + 2000).toISOString() });
+ok(rem.status === 201, 'Beto crea un recordatorio para dentro de 2 s');
+await until(async () => inbox, (m) => m.some((x) => x.data?.type === 'ReminderDue'), 30000);
+ok(inbox.some((x) => x.data?.type === 'ReminderDue'), 'el recordatorio llega como notificación');
+
+// ---- Validaciones ----
+ok((await call(beto.token, 'POST', '/communities', { name: 'x', visibility: 'public' })).status === 400, 'un nombre muy corto se rechaza con 400');
+ok((await call(beto.token, 'GET', '/notes/no-es-uuid')).status === 404, 'un id mal formado responde 404');
+
+ws.close();
+console.log(failures ? `\n${failures} comprobación(es) fallaron` : '\nTodo en orden');
+process.exit(failures ? 1 : 0);

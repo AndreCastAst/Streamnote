@@ -1,0 +1,136 @@
+# StreamNote en local.
+#   docker compose up --build        → http://localhost:5173
+#
+# Qué reemplaza a qué servicio de AWS:
+#   postgres  → Aurora PostgreSQL Serverless v2
+#   aws       → SQS, EventBridge, S3 y DynamoDB (emulados con moto)
+#   infra     → crea esos recursos con los MISMOS módulos de Terraform que se usarán en AWS
+#   mediamtx  → Amazon IVS (emisión WebRTC/WHIP, reproducción WHEP/HLS, grabación)
+#   api       → API Gateway + Lambda (mismas rutas)
+#   worker    → consumidores SQS en Lambda + EventBridge Scheduler
+#   web       → la app en el navegador (en AWS: S3 + CloudFront)
+
+x-backend-env: &backend-env
+  STAGE: local
+  DATABASE_URL: postgres://streamnote:streamnote@postgres:5432/streamnote
+  AWS_ENDPOINT_URL: http://aws:5000
+  AWS_PUBLIC_S3_ENDPOINT: http://localhost:5000
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  NOTE_WRITES_QUEUE_URL: http://aws:5000/123456789012/streamnote-local-note-writes
+  DOMAIN_EVENTS_QUEUE_URL: http://aws:5000/123456789012/streamnote-local-domain-events
+  MEDIA_JOBS_QUEUE_URL: http://aws:5000/123456789012/streamnote-local-media-jobs
+  EVENT_BUS_NAME: streamnote-local-bus
+  RECORDINGS_BUCKET: streamnote-local-recordings
+  NOTIFICATIONS_TABLE: streamnote-local-notifications
+  MEDIA_API_URL: http://mediamtx:9997
+  MEDIA_PUBLIC_WEBRTC_URL: http://localhost:8889
+  MEDIA_PUBLIC_HLS_URL: http://localhost:8888
+  MEDIA_RECORDINGS_DIR: /recordings
+  API_INTERNAL_URL: http://api:4000
+  WEB_ORIGIN: http://localhost:5173
+  JWT_SECRET: ${JWT_SECRET:-dev-secret-cambiar}
+  INTERNAL_SECRET: ${INTERNAL_SECRET:-internal-dev-secret}
+  RECORDING_PROVISIONAL_HOURS: ${RECORDING_PROVISIONAL_HOURS:-72}
+  STREAM_RECONNECT_WINDOW_SECONDS: 60
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: streamnote
+      POSTGRES_PASSWORD: streamnote
+      POSTGRES_DB: streamnote
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streamnote"]
+      interval: 2s
+      retries: 30
+
+  aws:
+    image: motoserver/moto:5.2.4
+    ports: ["5000:5000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/moto-api/')"]
+      interval: 2s
+      retries: 30
+
+  # Crea colas, bus, bucket y tabla con Terraform (perfil por defecto, ver .env)
+  infra:
+    image: hashicorp/terraform:1.9
+    profiles: [terraform]
+    entrypoint: ["/terraform/envs/local/apply.sh"]
+    environment:
+      AWS_ENDPOINT: http://aws:5000
+    volumes:
+      - ./infra/terraform:/terraform
+    depends_on:
+      aws: { condition: service_healthy }
+
+  # Alternativa si Terraform no está disponible: COMPOSE_PROFILES=sdk docker compose up
+  infra-sdk:
+    build: ./backend
+    profiles: [sdk]
+    command: ["npx", "tsx", "src/entrypoints/bootstrap-local.ts"]
+    environment: *backend-env
+    depends_on:
+      aws: { condition: service_healthy }
+
+  migrate:
+    build: ./backend
+    command: ["npx", "tsx", "src/entrypoints/migrate.ts"]
+    environment: *backend-env
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.2
+    ports:
+      - "8889:8889"     # WebRTC (WHIP/WHEP)
+      - "8189:8189/udp" # ICE
+      - "8189:8189/tcp"
+      - "8888:8888"     # HLS
+    volumes:
+      - ./infra/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+      - recordings:/recordings
+
+  api:
+    build: ./backend
+    command: ["npx", "tsx", "watch", "src/entrypoints/server.ts"]
+    environment: *backend-env
+    ports: ["4000:4000"]
+    volumes:
+      - ./backend/src:/app/src
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      infra: { condition: service_completed_successfully, required: false }
+      infra-sdk: { condition: service_completed_successfully, required: false }
+
+  worker:
+    build: ./backend
+    command: ["npx", "tsx", "watch", "src/entrypoints/worker.ts"]
+    environment: *backend-env
+    volumes:
+      - ./backend/src:/app/src
+      - recordings:/recordings
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      infra: { condition: service_completed_successfully, required: false }
+      infra-sdk: { condition: service_completed_successfully, required: false }
+      api: { condition: service_started }
+      mediamtx: { condition: service_started }
+
+  web:
+    build: ./web
+    environment:
+      VITE_API_URL: http://localhost:4000
+    ports: ["5173:5173"]
+    volumes:
+      - ./web/src:/app/src
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  recordings:

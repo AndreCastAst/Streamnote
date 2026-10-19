@@ -1,0 +1,7 @@
+{
+  "name": "streamnote-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node streaming.mjs" },
+  "devDependencies": { "playwright": "^1.64.1" }
+}

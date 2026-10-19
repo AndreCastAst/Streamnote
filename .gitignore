@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.data/
+.terraform/
+*.tfstate*
+.build/
+e2e/capturas/
+.env
