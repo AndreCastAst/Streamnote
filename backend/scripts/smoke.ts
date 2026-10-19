@@ -97,6 +97,64 @@ const copy = (await call(ana.token, 'POST', `/notes/${note.id}/copy`)).body;
 const copied = (await call(ana.token, 'GET', `/notes/${copy.id}`)).body;
 ok(copied.canEdit && copied.modules[1].sourceAuthor === 'Beto Alumno', 'Ana copia la nota; cada módulo recuerda su autor');
 
+// Acomodo en cuadrícula (lienzo): x, y, w, h por módulo, en unidades de la cuadrícula de 12 columnas
+const sameLayout = (a: any, b: any) => !!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+const ids = (ms: any[]) => ms.map((m) => m.id).join(',');
+const canvas = (
+  await call(beto.token, 'POST', '/notes', {
+    title: 'Lienzo',
+    modules: [
+      { id: randomUUID(), type: 'heading', content: { text: 'Lienzo', level: 1 } },
+      { id: randomUUID(), type: 'code', content: { code: 'x = 1', language: 'python' } },
+    ],
+  })
+).body;
+const canvas1 = (await call(beto.token, 'GET', `/notes/${canvas.id}`)).body;
+ok(
+  canvas1.modules.length === 2 && canvas1.modules.every((m: any) => m.layout && m.layout.x === 0 && m.layout.w === 12),
+  'una nota creada sin acomodo trae layout a ancho completo en cada módulo',
+);
+const [ma, mb, mc] = [
+  { id: randomUUID(), type: 'heading', content: { text: 'Izquierda', level: 2 }, layout: { x: 0, y: 0, w: 6, h: 2 } },
+  { id: randomUUID(), type: 'text', content: { text: 'Derecha' }, layout: { x: 6, y: 0, w: 6, h: 4 } },
+  { id: randomUUID(), type: 'checklist', content: { items: [{ text: 'Abajo', done: false }] }, layout: { x: 0, y: 4, w: 12, h: 3 } },
+];
+await call(beto.token, 'PUT', `/notes/${canvas.id}`, { opId: randomUUID(), version: 2, title: 'Lienzo', modules: [ma, mb, mc] });
+const canvas2 = (await until(() => call(beto.token, 'GET', `/notes/${canvas.id}`), (r) => r.body.version === 2)).body;
+ok(
+  canvas2.version === 2 && ids(canvas2.modules) === ids([ma, mb, mc]) && [ma, mb, mc].every((m, i) => sameLayout(canvas2.modules[i].layout, m.layout)),
+  'el acomodo se guarda tal cual y los módulos vuelven en orden de lectura',
+);
+await call(beto.token, 'PUT', `/notes/${canvas.id}`, { opId: randomUUID(), version: 3, title: 'Lienzo', modules: [mc, mb, ma] });
+const canvas3 = (await until(() => call(beto.token, 'GET', `/notes/${canvas.id}`), (r) => r.body.version === 3)).body;
+ok(canvas3.version === 3 && ids(canvas3.modules) === ids([ma, mb, mc]), 'módulos enviados en desorden se guardan en orden de lectura (y, x)');
+const outside = await call(beto.token, 'PUT', `/notes/${canvas.id}`, {
+  opId: randomUUID(),
+  version: 4,
+  title: 'Lienzo',
+  modules: [{ ...ma, layout: { x: 8, y: 0, w: 6, h: 2 } }],
+});
+await sleep(1500);
+ok(
+  outside.status === 400 && (await call(beto.token, 'GET', `/notes/${canvas.id}`)).body.version === 3,
+  'un módulo que se sale de la cuadrícula se rechaza con 400 y no cambia la versión',
+);
+const md = { id: randomUUID(), type: 'quote', content: { text: 'Sin acomodo' } };
+await call(beto.token, 'PUT', `/notes/${canvas.id}`, { opId: randomUUID(), version: 4, title: 'Lienzo', modules: [ma, md, mb, mc] });
+const canvas4 = (await until(() => call(beto.token, 'GET', `/notes/${canvas.id}`), (r) => r.body.version === 4)).body;
+const last = canvas4.modules?.[3];
+const bottom = Math.max(...[ma, mb, mc].map((m) => m.layout.y + m.layout.h));
+ok(
+  canvas4.version === 4 && canvas4.modules.length === 4 && last?.id === md.id && last.layout.x === 0 && last.layout.w === 12 && last.layout.y === bottom,
+  'un módulo sin acomodo entre otros con acomodo queda al final a ancho completo',
+);
+const canvasCopy = (await call(beto.token, 'POST', `/notes/${canvas.id}/copy`)).body;
+const canvasCopied = (await call(beto.token, 'GET', `/notes/${canvasCopy.id}`)).body;
+ok(
+  canvasCopied.modules?.length === 4 && canvas4.modules.every((m: any, i: number) => sameLayout(canvasCopied.modules[i].layout, m.layout)),
+  'la copia conserva el acomodo de cada módulo',
+);
+
 // ---- Directo: módulos compartidos y chat ----
 const stream = (await call(beto.token, 'POST', `/communities/${c.id}/streams`, { title: 'Repaso de integrales' })).body;
 ok(stream.id, 'Beto inicia un directo con el permiso concedido');

@@ -22,11 +22,41 @@ export const ModuleSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('quote'), content: z.object({ text: str(5000), cite: str(200).optional() }) }),
 ]);
 
+// Acomodo en una cuadrícula de 12 columnas, en unidades de cuadrícula. El alto es un mínimo:
+// el cliente lo agranda al dibujar si el contenido no cabe.
+export const GRID_COLS = 12;
+export const MAX_H = 200;
+
+const Layout = z
+  .object({
+    x: z.number().int().min(0).max(GRID_COLS - 1),
+    y: z.number().int().min(0).max(100_000),
+    w: z.number().int().min(1).max(GRID_COLS),
+    h: z.number().int().min(1).max(MAX_H),
+  })
+  .refine((l) => l.x + l.w <= GRID_COLS, { message: 'El módulo se sale de la cuadrícula' });
+type Layout = z.infer<typeof Layout>;
+
+// Opcional: los mensajes viejos de la cola y los clientes desactualizados no lo traen.
 const NoteModule = z.intersection(
-  z.object({ id: uuid, sourceModuleId: uuid.nullish(), sourceAuthor: str(80).nullish() }),
+  z.object({ id: uuid, sourceModuleId: uuid.nullish(), sourceAuthor: str(80).nullish(), layout: Layout.optional() }),
   ModuleSchema,
 );
 export type NoteModule = z.infer<typeof NoteModule>;
+
+/** Alto inicial por tipo (los mismos valores que la migración 002). */
+export function defaultHeight(type: NoteModule['type']): number {
+  switch (type) {
+    case 'heading':
+      return 2;
+    case 'code':
+      return 5;
+    case 'text':
+    case 'quote':
+    case 'checklist':
+      return 3;
+  }
+}
 
 const CreateNote = z.object({
   title: z.string().trim().min(1).max(200),
@@ -59,8 +89,18 @@ async function loadNote(db: Db, id: string) {
 }
 
 async function loadModules(db: Db, noteId: string) {
-  const rows = await db.query<{ id: string; type: string; content: unknown; source_module_id: string | null; source_author: string | null }>(
-    'SELECT id, type, content, source_module_id, source_author FROM note_modules WHERE note_id = :n::uuid ORDER BY position',
+  const rows = await db.query<{
+    id: string;
+    type: string;
+    content: unknown;
+    source_module_id: string | null;
+    source_author: string | null;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }>(
+    'SELECT id, type, content, source_module_id, source_author, x, y, w, h FROM note_modules WHERE note_id = :n::uuid ORDER BY position',
     { n: noteId },
   );
   return rows.map((r) => ({
@@ -69,6 +109,7 @@ async function loadModules(db: Db, noteId: string) {
     content: typeof r.content === 'string' ? JSON.parse(r.content) : r.content,
     sourceModuleId: r.source_module_id,
     sourceAuthor: r.source_author,
+    layout: { x: Number(r.x), y: Number(r.y), w: Number(r.w), h: Number(r.h) },
   }));
 }
 
@@ -80,13 +121,40 @@ async function readAccess(db: Db, noteId: string, ownerId: string, userId: strin
   return null;
 }
 
+/**
+ * Inserta los módulos con su acomodo. Los que llegan sin acomodo van al final, a ancho completo,
+ * apilados en el orden en que llegaron. `position` es el orden de lectura: (y, x), y a igualdad,
+ * el orden del arreglo. No se validan solapamientos: el cliente los resuelve al dibujar.
+ */
 async function insertModules(db: Db, noteId: string, modules: NoteModule[]) {
+  let bottom = modules.reduce((max, m) => (m.layout ? Math.max(max, m.layout.y + m.layout.h) : max), 0);
+  const placed = modules.map((m, index) => {
+    let layout: Layout | undefined = m.layout;
+    if (!layout) {
+      layout = { x: 0, y: bottom, w: GRID_COLS, h: defaultHeight(m.type) };
+      bottom += layout.h;
+    }
+    return { m, layout, index };
+  });
+  placed.sort((a, b) => a.layout.y - b.layout.y || a.layout.x - b.layout.x || a.index - b.index);
   let position = 0;
-  for (const m of modules) {
+  for (const { m, layout } of placed) {
     await db.query(
-      `INSERT INTO note_modules (id, note_id, position, type, content, source_module_id, source_author)
-       VALUES (:id::uuid, :noteId::uuid, :position, :type, :content::jsonb, :src::uuid, :author)`,
-      { id: m.id, noteId, position: position++, type: m.type, content: m.content, src: m.sourceModuleId ?? null, author: m.sourceAuthor ?? null },
+      `INSERT INTO note_modules (id, note_id, position, type, content, source_module_id, source_author, x, y, w, h)
+       VALUES (:id::uuid, :noteId::uuid, :position, :type, :content::jsonb, :src::uuid, :author, :x, :y, :w, :h)`,
+      {
+        id: m.id,
+        noteId,
+        position: position++,
+        type: m.type,
+        content: m.content,
+        src: m.sourceModuleId ?? null,
+        author: m.sourceAuthor ?? null,
+        x: layout.x,
+        y: layout.y,
+        w: layout.w,
+        h: layout.h,
+      },
     );
   }
 }
