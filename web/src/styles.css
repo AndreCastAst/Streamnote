@@ -349,7 +349,41 @@ table.members { width: 100%; border-collapse: collapse; }
 .add-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: var(--step); }
 .add-bar button { font-size: 0.875rem; background: rgba(255, 255, 255, 0.9); }
 
-.note-page { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 32px; align-items: start; }
+/* ---------- Vista de trabajo de «Mis notas»: panel | pestañas + hoja | panel de la nota ---------- */
+.workspace { --ws-top: 72px; max-width: 1600px; margin: 0 auto; display: grid; grid-template-columns: 260px minmax(0, 1fr) 280px; gap: 20px; align-items: start; }
+.ws-tree { position: sticky; top: var(--ws-top); height: calc(100vh - var(--ws-top) - 20px); min-height: 320px; }
+.ws-tree > .file-tree { height: 100%; }
+.ws-tree-loading { padding: 12px; }
+.ws-main { min-width: 0; display: grid; gap: 0; }
+.ws-tabs-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.ws-files-button { display: none; flex: none; margin-bottom: 6px; }
+.ws-tabs { flex: 1; min-width: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: thin; }
+.ws-tab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  max-width: 240px;
+  border: 1px solid var(--rule);
+  border-bottom: 0;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: color-mix(in srgb, var(--grid) 30%, white);
+  color: var(--ink-soft);
+}
+.ws-tab.active { background: var(--surface); color: var(--ink); box-shadow: inset 0 3px 0 var(--margin); position: relative; top: 1px; }
+.ws-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-radius: 0; background: none; color: inherit; padding: 7px 4px 6px 12px; font-size: 0.9375rem; }
+.ws-tab.active .ws-tab-title { font-weight: 700; }
+.ws-tab-close { flex: none; border: 0; background: none; color: inherit; padding: 0 8px; font-size: 1.125rem; line-height: 1; }
+.ws-tab-close:hover:not(:disabled) { color: var(--margin); }
+.ws-tab-title:focus-visible, .ws-tab-close:focus-visible { outline-offset: -2px; }
+.ws-sheet { min-width: 0; }
+.ws-empty { display: grid; place-content: center; min-height: 50vh; border: 1px dashed var(--rule); border-radius: var(--radius); color: var(--ink-soft); text-align: center; padding: 24px; }
+.ws-empty p { margin: 0; }
+.ws-backdrop { display: none; }
+.note-link { border-left: 3px solid var(--highlight); }
+.note-link p { margin: 0; }
+.note-link button { justify-self: start; }
+.note-link.frozen { border-left-color: var(--ink-soft); }
+.lock-mark { font-weight: 400; font-size: 0.875em; }
 
 /* ---------- Directo ---------- */
 .shell.wide main { padding: 20px 20px 32px; }
@@ -523,6 +557,10 @@ button.primary.danger:hover:not(:disabled) { background: #b92f33; }
 
 /* ---------- Pantallas angostas ---------- */
 @media (max-width: 1200px) {
+  /* El panel de la nota pasa debajo de la hoja; el árbol ocupa las dos filas y la segunda absorbe su alto */
+  .workspace { grid-template-columns: 240px minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .ws-tree { grid-row: 1 / span 2; }
+  .ws-side { grid-column: 2; position: static; }
   .live-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .live-shared { grid-column: 1 / -1; position: static; max-height: none; }
 }
@@ -530,7 +568,27 @@ button.primary.danger:hover:not(:disabled) { background: #b92f33; }
   main { padding: 20px 16px 48px; }
   .topbar { flex-wrap: wrap; gap: 8px 16px; padding: 10px 16px; }
   .topbar-right { margin-left: 0; }
-  .two-col, .note-page, .live-grid { grid-template-columns: minmax(0, 1fr); }
+  .two-col, .live-grid, .workspace { grid-template-columns: minmax(0, 1fr); }
+  .workspace { grid-template-rows: none; }
+  .ws-side { grid-column: auto; }
+  /* El panel pasa a ser un cajón sobre la hoja. Sin `transform`: el menú «⋯» es `position: fixed` y
+     un `transform` en un antepasado lo ubicaría respecto del cajón y no de la ventana. */
+  .ws-tree { display: none; }
+  .workspace.drawer-open .ws-tree {
+    display: block;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 30;
+    width: min(320px, calc(100vw - 48px));
+    height: auto;
+    min-height: 0;
+    box-shadow: 0 0 32px rgba(27, 42, 65, 0.3);
+  }
+  .workspace.drawer-open .ws-tree > .file-tree { border-radius: 0; border-width: 0 1px 0 0; }
+  .workspace.drawer-open .ws-backdrop { display: block; position: fixed; inset: 0; z-index: 29; background: rgba(27, 42, 65, 0.35); }
+  .ws-files-button { display: inline-flex; }
   .side-forms { position: static; }
   .sheet { --gutter: 28px; padding-left: calc(var(--gutter) + 12px); padding-right: 12px; }
   .notif-panel { width: min(380px, calc(100vw - 32px)); right: auto; left: 0; }

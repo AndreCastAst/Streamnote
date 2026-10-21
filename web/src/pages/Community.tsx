@@ -274,10 +274,32 @@ function StreamsTab({ c, manager }: { c: Community; manager: boolean }) {
 }
 
 // ---------- Apuntes compartidos ----------
+interface SharedNote {
+  id: string;
+  title: string;
+  updated_at: string;
+  author: string;
+  modules: number;
+  locked: boolean;
+  stream: { id: string; title: string } | null;
+}
+
+/** Con el Data API, `json_build_object` puede llegar como texto: se acepta de las dos formas. */
+function parseStream(v: unknown): SharedNote['stream'] {
+  if (typeof v !== 'string') return (v as SharedNote['stream']) ?? null;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return null;
+  }
+}
+
 function SharedNotesTab({ c }: { c: Community }) {
-  const [notes, setNotes] = useState<any[] | null>(null);
+  const [notes, setNotes] = useState<SharedNote[] | null>(null);
   useEffect(() => {
-    api('GET', `/communities/${c.id}/notes`).then(setNotes).catch(() => setNotes([]));
+    api<SharedNote[]>('GET', `/communities/${c.id}/notes`)
+      .then((rows) => setNotes(rows.map((n) => ({ ...n, stream: parseStream(n.stream) }))))
+      .catch(() => setNotes([]));
   }, [c.id]);
   return (
     <div className="tab-body">
@@ -287,9 +309,19 @@ function SharedNotesTab({ c }: { c: Community }) {
           <li key={n.id}>
             <Link to={`/notes/${n.id}`} className="row-link">
               <span className="row-main">
-                <strong>{n.title}</strong>
+                <strong>
+                  {n.title}
+                  {n.locked && (
+                    <span className="lock-mark" title="Copia congelada">
+                      {' '}
+                      <span aria-hidden="true">🔒</span>
+                      <span className="sr-only">Copia congelada</span>
+                    </span>
+                  )}
+                </strong>
                 <span className="muted">
                   {n.author}, {n.modules} {n.modules === 1 ? 'módulo' : 'módulos'}
+                  {n.stream && ` · Directo: ${n.stream.title}`}
                 </span>
               </span>
               <span className="row-meta">{formatDate(n.updated_at)}</span>

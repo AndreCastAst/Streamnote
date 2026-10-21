@@ -45,6 +45,31 @@ interface Props {
   noteId: string;
   onShare?: (m: NoteModule) => Promise<void>;
   compact?: boolean;
+  /** Título de la nota al cargarla y cada vez que cambia (para la pestaña y el árbol). */
+  onTitle?(title: string): void;
+}
+
+/** Última instantánea enviada o pendiente de enviar de una nota, con la versión que lleva (o llevará) su `PUT`. */
+interface Snapshot {
+  version: number;
+  title: string;
+  modules: NoteModule[];
+}
+
+// Vive fuera del componente para sobrevivir al cambio de pestaña: el `PUT` solo encola y el consumidor lo
+// aplica después, así que al volver a una nota su `GET` puede traer todavía la versión anterior. Si la
+// instantánea es más nueva que lo que trae el servidor, el editor arranca desde ella y no pierde lo último.
+const snapshots = new Map<string, Snapshot>();
+
+/** Guarda la instantánea solo si no es más vieja que la que hay (un editor ya desmontado puede seguir reintentando). */
+function remember(noteId: string, snap: Snapshot) {
+  const prev = snapshots.get(noteId);
+  if (!prev || prev.version <= snap.version) snapshots.set(noteId, snap);
+}
+
+/** Versión de lo último que el editor envió o tiene pendiente de enviar para esta nota (para desligarla). */
+export function lastSentVersion(noteId: string): number | null {
+  return snapshots.get(noteId)?.version ?? null;
 }
 
 type Status = 'saved' | 'pending' | 'saving' | 'error';
@@ -96,7 +121,7 @@ function sameIds(a: Layout, b: Layout): boolean {
   return a.every((l) => ids.has(l.i));
 }
 
-export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEditor({ noteId, onShare, compact }, ref) {
+export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEditor({ noteId, onShare, compact, onTitle }, ref) {
   const [loaded, setLoaded] = useState<{ canEdit: boolean; author?: string } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -114,6 +139,8 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
   const saving = useRef(false);
   const timer = useRef<number>();
   const noticeTimer = useRef<number>();
+  const onTitleRef = useRef(onTitle);
+  onTitleRef.current = onTitle;
 
   // Arrastre en curso (solo escritorio): qué módulo se arrastra, la celda bajo la sonda del puntero
   // y `dy`, lo que hay que bajar el puntero para que la sonda quede en el propio módulo al empezar
@@ -164,6 +191,22 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
     api(`GET`, `/notes/${noteId}`)
       .then((n) => {
         if (!alive) return;
+        const snap = snapshots.get(noteId);
+        if (snap && snap.version > n.version && n.canEdit) {
+          // El servidor todavía no aplicó lo último que se envió (o quedó pendiente): se sigue desde ahí
+          const mods = readingOrder(withLayouts(snap.modules));
+          version.current = snap.version;
+          latest.current = { title: snap.title, modules: mods };
+          setTitle(snap.title);
+          setModules(mods);
+          setLoaded({ canEdit: n.canEdit, author: n.author });
+          dirty.current = true;
+          setStatus('pending');
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(flush, 1000);
+          return;
+        }
+        if (snap) snapshots.delete(noteId);
         const mods = readingOrder(withLayouts(n.modules));
         version.current = n.version;
         latest.current = { title: n.title, modules: mods };
@@ -179,6 +222,10 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
 
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
 
+  useEffect(() => {
+    if (loaded) onTitleRef.current?.(title);
+  }, [title, loaded]);
+
   // Autoguardado: cada intento lleva una versión mayor; el servidor descarta las que lleguen tarde
   const flush = useCallback(async () => {
     if (saving.current || !dirty.current) return;
@@ -187,6 +234,7 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
     setStatus('saving');
     version.current += 1;
     const snapshot = latest.current;
+    remember(noteId, { version: version.current, ...snapshot });
     try {
       await api('PUT', `/notes/${noteId}`, { opId: crypto.randomUUID(), version: version.current, ...snapshot });
       setStatus(dirty.current ? 'pending' : 'saved');
@@ -208,6 +256,8 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
 
   const commit = (next: { title?: string; modules?: NoteModule[] }) => {
     latest.current = { ...latest.current, ...next };
+    // Pendiente: la llevará el próximo `PUT`, con la versión siguiente a la última enviada
+    remember(noteId, { version: version.current + 1, ...latest.current });
     if (next.title !== undefined) setTitle(next.title);
     if (next.modules) setModules(next.modules);
     dirty.current = true;

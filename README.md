@@ -22,6 +22,7 @@ Para probar los dos roles a la vez, entra con un correo en una ventana normal y 
 4. Ana inicia un directo y pulsa «Compartir cámara». Beto recibe el aviso «está en vivo» y entra.
 5. Los dos toman apuntes en su propia nota de la sesión. Ana pasa el cursor sobre un módulo y pulsa «Compartir en el directo»; a Beto le aparece en «Lo que se comparte» y lo agrega a su nota, marcado con resaltador y el nombre de Ana.
 6. Ana termina el directo. En un minuto la grabación aparece en la comunidad como **provisional**. Beto puede «Pedir que se conserve»; Ana pulsa «Conservar».
+7. En «Mis notas», cada uno ordena sus notas en carpetas (panel «Mis archivos») y las abre como pestañas sobre la hoja. La nota del directo quedó sola en «Directos / [comunidad]», donde los miembros la ven en solo lectura; se puede mover a una carpeta propia (sigue vinculada, con la etiqueta «de [comunidad]») o desligar: la nota queda solo para su autor y la comunidad se queda con una copia congelada.
 
 ## Qué reemplaza a qué
 

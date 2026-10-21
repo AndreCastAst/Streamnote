@@ -4,7 +4,7 @@ import { handleUnauthorized, loadSession, realtime, saveSession, setToken, type 
 import { Login } from './pages/Login';
 import { Home } from './pages/Home';
 import { CommunityPage } from './pages/Community';
-import { NotesPage, NotePage } from './pages/Notes';
+import { NotesWorkspace } from './pages/Notes';
 import { LivePage } from './pages/Live';
 import { RemindersPage } from './pages/Reminders';
 import { Notifications } from './components/Notifications';
@@ -48,8 +48,8 @@ export function App() {
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/c/:id" element={<CommunityPage />} />
-              <Route path="/notas" element={<NotesPage />} />
-              <Route path="/notes/:id" element={<NotePage />} />
+              <Route path="/notas" element={<NotesWorkspace />} />
+              <Route path="/notes/:id" element={<NotesWorkspace />} />
               <Route path="/live/:id" element={<LivePage />} />
               <Route path="/recordatorios" element={<RemindersPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
@@ -70,7 +70,7 @@ function Shell({ children }: { children: ReactNode }) {
   const location = useLocation();
   const [online, setOnline] = useState(realtime.connected);
   useEffect(() => realtime.onStatus(setOnline), []);
-  const wide = location.pathname.startsWith('/live/');
+  const wide = location.pathname.startsWith('/live/') || location.pathname === '/notas' || location.pathname.startsWith('/notes/');
 
   return (
     <div className={`shell${wide ? ' wide' : ''}`}>
