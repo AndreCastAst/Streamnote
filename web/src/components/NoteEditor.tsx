@@ -4,15 +4,38 @@ import {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
   type RefObject,
   type TextareaHTMLAttributes,
 } from 'react';
-import { Responsive, useContainerWidth, verticalCompactor, type Layout, type LayoutItem } from 'react-grid-layout';
+import {
+  Responsive,
+  cloneLayout,
+  moveElement,
+  useContainerWidth,
+  verticalCompactor,
+  type Compactor,
+  type Layout,
+  type LayoutItem,
+} from 'react-grid-layout';
 import { api, type NoteModule, type ModuleType } from '../api';
-import { ROW_PX, applyGridLayout, layoutOf, placeAtBottom, readingOrder, reorderSlots, resizedHeight, sameLayouts, withLayouts } from '../layout';
+import {
+  GRID_COLS,
+  ROW_PX,
+  applyGridLayout,
+  dropLayout,
+  layoutOf,
+  placeAtBottom,
+  readingOrder,
+  reorderSlots,
+  resizedHeight,
+  sameLayouts,
+  withLayouts,
+  type Cell,
+} from '../layout';
 
 export interface NoteEditorHandle {
   addModule(m: Omit<NoteModule, 'id'>): void;
@@ -54,6 +77,25 @@ const BREAKPOINTS = { lg: 600, xs: 0 };
 const COLS = { lg: 12, xs: 1 };
 const NARROW_MAX = BREAKPOINTS.lg;
 
+type Layouts = { lg: LayoutItem[]; xs: LayoutItem[] };
+
+/** Punto del puntero de un evento de arrastre (ratón o toque; en `touchend` solo queda `changedTouches`). */
+function pointOf(e: Event): { x: number; y: number } | null {
+  if (typeof MouseEvent !== 'undefined' && e instanceof MouseEvent) return { x: e.clientX, y: e.clientY };
+  if (typeof TouchEvent !== 'undefined' && e instanceof TouchEvent) {
+    const t = e.touches[0] ?? e.changedTouches[0];
+    return t ? { x: t.clientX, y: t.clientY } : null;
+  }
+  return null;
+}
+
+/** Verdadero si los dos acomodos tienen exactamente los mismos ids. */
+function sameIds(a: Layout, b: Layout): boolean {
+  if (a.length !== b.length) return false;
+  const ids = new Set(b.map((l) => l.i));
+  return a.every((l) => ids.has(l.i));
+}
+
 export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEditor({ noteId, onShare, compact }, ref) {
   const [loaded, setLoaded] = useState<{ canEdit: boolean; author?: string } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -72,6 +114,50 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
   const saving = useRef(false);
   const timer = useRef<number>();
   const noticeTimer = useRef<number>();
+
+  // Arrastre en curso (solo escritorio): qué módulo se arrastra, la celda bajo la sonda del puntero
+  // y `dy`, lo que hay que bajar el puntero para que la sonda quede en el propio módulo al empezar
+  // (el asa ⠿ sobresale por encima de él)
+  const dragIntent = useRef<{ draggedId: string; cell: Cell | null; dy: number } | null>(null);
+  // Acomodo de antes del arrastre (compactado y con los altos dibujados): de él parte la vista previa
+  const dragBase = useRef<LayoutItem[] | null>(null);
+  // El objeto `layouts` que tenía la cuadrícula al empezar el arrastre: se le sigue pasando el mismo
+  // para que un re-render a mitad del arrastre no la haga recalcular con la vista previa a medias
+  const dragLayouts = useRef<Layouts | null>(null);
+  // Hay un arrastre o un redimensionado en curso: mientras tanto no se guarda en onLayoutChange
+  const gesture = useRef(false);
+
+  // Compactador propio: fuera de un arrastre, o en la vista angosta, es el vertical de siempre.
+  // Durante un arrastre en escritorio, la librería lo llama justo después de la prop `onDrag` (que deja
+  // la celda en `dragIntent`) y dibuja lo que devuelve: así se ve, antes de soltar, la fila repartida.
+  // Parte siempre del acomodo de antes del arrastre; del que le pasa la librería solo toma dónde
+  // propone poner el módulo arrastrado.
+  const dropCompactor = useMemo<Compactor>(
+    () => ({
+      type: 'vertical',
+      allowOverlap: false,
+      compact(layout: Layout, cols: number): Layout {
+        const intent = dragIntent.current;
+        const base = dragBase.current;
+        if (cols !== GRID_COLS || !intent || !base || !sameIds(layout, base)) return verticalCompactor.compact(layout, cols);
+        const proposed = layout.find((l) => l.i === intent.draggedId);
+        if (!proposed) return verticalCompactor.compact(layout, cols);
+        const target = { x: proposed.x, y: proposed.y };
+        const result = dropLayout(base, intent.draggedId, target, intent.cell);
+        if (result.split) return verticalCompactor.compact(result.layout, GRID_COLS);
+        // Sin reparto, el arrastrado vuelve a su ancho de partida y se lleva a donde lo propone la
+        // librería, apartando a los demás como siempre. La `x` propuesta pudo calcularse con el ancho
+        // de una vista previa repartida, así que se limita para que quepa con su ancho.
+        const clone = cloneLayout(result.layout);
+        const dragged = clone.find((l) => l.i === intent.draggedId);
+        if (!dragged) return verticalCompactor.compact(clone, GRID_COLS);
+        const x = Math.min(Math.max(0, target.x), GRID_COLS - dragged.w);
+        const moved = moveElement(clone, dragged, x, target.y, true, false, 'vertical', GRID_COLS, false);
+        return verticalCompactor.compact(moved, GRID_COLS);
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -242,30 +328,86 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
 
   const grid = (width: number) => {
     const narrow = width <= NARROW_MAX;
+    const layouts: Layouts = { lg, xs };
 
-    // Solo se guarda al soltar (no en onLayoutChange, que también salta al montar y al cambiar de punto de quiebre)
+    const onDragStart = (layout: Layout, _oldItem: LayoutItem | null, newItem: LayoutItem | null, _ph: LayoutItem | null, e: Event, node: HTMLElement | null) => {
+      gesture.current = true;
+      dragLayouts.current = layouts;
+      if (narrow || !newItem) return;
+      // Copia profunda: el primer `onDrag` de la librería mueve los mismos objetos de este `layout`
+      dragBase.current = cloneLayout(layout);
+      const point = pointOf(e);
+      const dy = point && node ? Math.max(0, node.getBoundingClientRect().top + ROW_PX / 2 - point.y) : 0;
+      dragIntent.current = { draggedId: newItem.i, cell: null, dy };
+    };
+
+    // Celda bajo la sonda del puntero; el compactador la lee justo después para armar la vista previa
+    const onDrag = (_layout: Layout, _oldItem: LayoutItem | null, _newItem: LayoutItem | null, _ph: LayoutItem | null, e: Event, node: HTMLElement | null) => {
+      const intent = dragIntent.current;
+      if (narrow || !intent || !node) return;
+      const point = pointOf(e);
+      const container = (node.offsetParent as HTMLElement | null) ?? node.parentElement;
+      if (!point || !container) return;
+      const rect = container.getBoundingClientRect();
+      const col = Math.min(GRID_COLS - 1, Math.max(0, Math.floor((point.x - rect.left) / ((width + 8) / GRID_COLS))));
+      // Sin tope abajo: soltar por debajo del último módulo no cuenta como estar sobre él
+      const row = Math.max(0, Math.floor((point.y + intent.dy - rect.top) / ROW_PX));
+      intent.cell = { col, row };
+    };
+
+    // Al soltar se guarda el acomodo final (ya con el reparto, si lo hubo). La intención se limpia aquí,
+    // después de que la librería compactó con ella por última vez.
     const onDragStop = (layout: Layout, _oldItem: LayoutItem | null, newItem: LayoutItem | null) => {
-      if (!newItem) return;
-      const current = latest.current.modules;
-      if (narrow) {
-        // En una columna, arrastrar solo cambia el orden de lectura: se traduce a lugares del escritorio
-        const from = current.findIndex((m) => m.id === newItem.i);
-        const to = [...layout].sort((a, b) => a.y - b.y || a.x - b.x).findIndex((l) => l.i === newItem.i);
-        if (from < 0 || to < 0 || from === to) return;
-        commit({ modules: reorderSlots(current, from, to) });
-        return;
+      try {
+        if (!newItem) return;
+        const current = latest.current.modules;
+        if (narrow) {
+          // En una columna, arrastrar solo cambia el orden de lectura: se traduce a lugares del escritorio
+          const from = current.findIndex((m) => m.id === newItem.i);
+          const to = [...layout].sort((a, b) => a.y - b.y || a.x - b.x).findIndex((l) => l.i === newItem.i);
+          if (from < 0 || to < 0 || from === to) return;
+          commit({ modules: reorderSlots(current, from, to) });
+          return;
+        }
+        saveLayout(readingOrder(applyGridLayout(current, layout)));
+      } finally {
+        dragIntent.current = null;
+        dragBase.current = null;
+        dragLayouts.current = null;
+        gesture.current = false;
       }
-      saveLayout(readingOrder(applyGridLayout(current, layout)));
+    };
+
+    const onResizeStart = () => {
+      gesture.current = true;
     };
 
     const onResizeStop = (layout: Layout, oldItem: LayoutItem | null, newItem: LayoutItem | null) => {
-      if (!oldItem || !newItem || narrow) return;
+      try {
+        if (!oldItem || !newItem || narrow) return;
+        const current = latest.current.modules;
+        const resized = current.find((m) => m.id === newItem.i);
+        if (!resized) return;
+        const h = resizedHeight(layoutOf(resized).h, oldItem, newItem, measured[newItem.i] ?? 0, resized.type);
+        const next = applyGridLayout(current, layout).map((m) => (m.id === newItem.i ? { ...m, layout: { ...layoutOf(m), h } } : m));
+        saveLayout(readingOrder(next));
+      } finally {
+        gesture.current = false;
+      }
+    };
+
+    // Se guarda el acomodo que se ve: cuando un módulo crece, la librería empuja a los de abajo solo en
+    // pantalla y llama aquí con el acomodo compactado. Se guarda solo si cambia el orden de lectura
+    // (así abrir la nota o cambiar el tamaño de la ventana no guarda nada si el orden visible es el mismo).
+    // No se guarda en la vista angosta, cuyos `y` son los de una columna, ni durante un arrastre o
+    // redimensionado: esos se guardan al soltar.
+    const onLayoutChange = (layout: Layout) => {
+      if (narrow || !editable || gesture.current) return;
       const current = latest.current.modules;
-      const resized = current.find((m) => m.id === newItem.i);
-      if (!resized) return;
-      const h = resizedHeight(layoutOf(resized).h, oldItem, newItem, measured[newItem.i] ?? 0, resized.type);
-      const next = applyGridLayout(current, layout).map((m) => (m.id === newItem.i ? { ...m, layout: { ...layoutOf(m), h } } : m));
-      saveLayout(readingOrder(next));
+      const ids = new Set(current.map((m) => m.id));
+      if (!layout.every((l) => ids.has(l.i))) return;
+      const next = readingOrder(applyGridLayout(current, layout));
+      if (next.some((m, k) => m.id !== current[k].id)) saveLayout(next);
     };
 
     return (
@@ -277,12 +419,16 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
         rowHeight={ROW_PX}
         margin={[8, 0]}
         containerPadding={[0, 0]}
-        compactor={verticalCompactor}
-        layouts={{ lg, xs }}
+        compactor={dropCompactor}
+        layouts={gesture.current && dragLayouts.current ? dragLayouts.current : layouts}
         dragConfig={{ enabled: editable, handle: '.module-drag', cancel: 'input, textarea, button, select' }}
         resizeConfig={{ enabled: editable && !narrow, handles: ['e', 's', 'se'] }}
+        onDragStart={onDragStart}
+        onDrag={onDrag}
         onDragStop={onDragStop}
+        onResizeStart={onResizeStart}
         onResizeStop={onResizeStop}
+        onLayoutChange={onLayoutChange}
       >
         {modules.map(renderModule)}
       </Responsive>

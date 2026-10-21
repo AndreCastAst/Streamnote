@@ -84,8 +84,9 @@ function sideBySide({ grid, text, code }) {
   return near(text.y, code.y) && code.x >= text.x + text.width - 1 && text.width < half && code.width < half && near(text.width, code.width, grid.width * 0.1);
 }
 
-// Arrastra con el ratón desde el centro de `handle`, pasando por cada desplazamiento de `path` (medidos desde el inicio)
-async function drag(page, handle, path) {
+// Arrastra con el ratón desde el centro de `handle`, pasando por cada desplazamiento de `path` (medidos desde el inicio).
+// Con `release` falso no suelta: sirve para mirar la vista previa antes de soltar (luego, `page.mouse.up()`)
+async function drag(page, handle, path, release = true) {
   const b = await handle.boundingBox();
   if (!b) throw new Error('el asa no está visible');
   const x = b.x + b.width / 2;
@@ -93,7 +94,40 @@ async function drag(page, handle, path) {
   await page.mouse.move(x, y);
   await page.mouse.down();
   for (const [dx, dy] of path) await page.mouse.move(x + dx, y + dy, { steps: 12 });
-  await page.mouse.up();
+  if (release) await page.mouse.up();
+}
+
+// Espera el PUT de la nota cuyo cuerpo cumple `test`. Al soltar, React actualiza el estado de forma
+// asíncrona y «Guardado» puede ser aún el del guardado anterior: por eso se espera el PUT concreto
+function savedNote(page, test) {
+  return page
+    .waitForResponse(
+      (r) => {
+        if (r.request().method() !== 'PUT' || !/\/notes\/[^/]+$/.test(new URL(r.url()).pathname)) return false;
+        let body;
+        try {
+          body = r.request().postDataJSON();
+        } catch {
+          return false;
+        }
+        return Boolean(body?.modules && test(body));
+      },
+      { timeout: 15000 },
+    )
+    .then((r) => {
+      if (!r.ok()) throw new Error(`el guardado de la nota respondió ${r.status()}`);
+      return r;
+    });
+}
+
+// Acomodo guardado de cada tipo de módulo en el cuerpo de un PUT
+const layoutsByType = (body) => Object.fromEntries(body.modules.map((m) => [m.type, m.layout]));
+
+// Tres cajas en una misma fila, cada una a un tercio (menos del 40 % de la cuadrícula)
+function inThirds(grid, boxes) {
+  if (!grid || boxes.some((b) => !b)) return false;
+  const [first] = boxes;
+  return boxes.every((b) => near(b.y, first.y) && b.width < grid.width * 0.4 && near(b.width, first.width, grid.width * 0.1));
 }
 
 // Lleva el borde derecho del módulo a la mitad de la cuadrícula (6 de 12 columnas, con margen de 8 px)
@@ -164,6 +198,79 @@ if (!kept) throw new Error('tras recargar, los módulos ya no están lado a lado
 await ana.screenshot({ path: `${shots}/01b-lienzo.png` });
 step('tras recargar, los módulos siguen lado a lado');
 
+// Reparto de la fila: Ana agrega una lista y la arrastra al tercio derecho del módulo de código. Antes de
+// soltar, la vista previa ya muestra la fila repartida a un tercio (el hueco gris es donde caerá la lista)
+const listModule = ana.locator('.sheet .module-checklist');
+await ana.locator('.sheet .add-bar').getByRole('button', { name: 'Lista', exact: true }).click();
+await listModule.waitFor();
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+step('Ana agregó un módulo de lista al final');
+{
+  const { code } = await sheetBoxes(ana);
+  await listModule.hover(); // el asa ⠿ tiene opacidad 0 hasta pasar el cursor
+  const handle = await listModule.locator('.module-drag').boundingBox();
+  const from = { x: handle.x + handle.width / 2, y: handle.y + handle.height / 2 };
+  const to = { x: code.x + code.width * 0.9, y: code.y + code.height / 2 };
+  await drag(ana, listModule.locator('.module-drag'), [[to.x - from.x, to.y - from.y]], false);
+}
+await until(
+  ana,
+  async () => {
+    const { grid, text, code } = await sheetBoxes(ana);
+    const [placeholder, list] = await Promise.all([ana.locator('.sheet .react-grid-placeholder').boundingBox(), listModule.boundingBox()]);
+    return inThirds(grid, [text, code, placeholder]) && list && list.width < grid.width * 0.4 && placeholder.x >= code.x + code.width - 1;
+  },
+  'antes de soltar, la vista previa no muestra la fila repartida a un tercio',
+);
+await ana.screenshot({ path: `${shots}/01e-lienzo-vista-previa.png` });
+step('antes de soltar, la vista previa muestra texto, código y lista a un tercio');
+const thirdsSaved = savedNote(ana, (body) => {
+  const l = layoutsByType(body);
+  return [l.text, l.code, l.checklist].every((x) => x && x.y === l.text.y && x.w === 4) && l.text.x === 0 && l.code.x === 4 && l.checklist.x === 8;
+});
+await ana.mouse.up();
+await thirdsSaved;
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+step('al soltar se guardó la fila repartida a un tercio');
+
+const thirdsNow = async () => {
+  const { grid, text, code } = await sheetBoxes(ana);
+  return inThirds(grid, [text, code, await listModule.boundingBox()]);
+};
+let thirdsKept = false;
+for (let i = 0; i < 10 && !thirdsKept; i++) {
+  if (i) await ana.waitForTimeout(1000);
+  await ana.reload();
+  await listModule.waitFor();
+  await ana.waitForTimeout(500); // deja que se midan los módulos
+  thirdsKept = await thirdsNow();
+}
+if (!thirdsKept) throw new Error('tras recargar, la fila ya no está repartida a un tercio');
+step('tras recargar, texto, código y lista siguen en una fila a un tercio');
+
+// Sacar la lista de la fila repartida, soltándola debajo de todo: texto y código vuelven a la mitad
+const halvesSaved = savedNote(ana, (body) => {
+  const l = layoutsByType(body);
+  return l.text?.w === 6 && l.code?.w === 6 && l.text.y === l.code.y && l.checklist?.y > l.text.y;
+});
+{
+  const grid = await ana.locator('.sheet .modules').boundingBox();
+  await listModule.hover();
+  const handle = await listModule.locator('.module-drag').boundingBox();
+  await drag(ana, listModule.locator('.module-drag'), [[0, grid.y + grid.height + 3 * 24 - (handle.y + handle.height / 2)]]);
+}
+await halvesSaved;
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+await until(ana, async () => sideBySide(await sheetBoxes(ana)), 'al sacar la lista de la fila, texto y código no volvieron a la mitad');
+step('al sacar la lista de la fila, texto y código vuelven a la mitad');
+
+// Se elimina la lista para que el resto del bloque siga con dos módulos
+await listModule.hover();
+await listModule.getByRole('button', { name: 'Eliminar módulo' }).click();
+await until(ana, async () => (await ana.locator('.sheet .module').count()) === 2, 'la lista no se eliminó');
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+step('lista eliminada; quedan el texto y el código');
+
 // El alto que guarda el autor es un mínimo: el módulo crece con el texto, sin desplazamiento interno
 const heightBefore = (await textModule.boundingBox()).height;
 const textArea = ana.locator('.sheet textarea.in-text');
@@ -173,6 +280,47 @@ const scroll = await textArea.evaluate((t) => ({ scroll: t.scrollHeight, client:
 if (scroll.scroll > scroll.client + 1) throw new Error(`el textarea tiene desplazamiento interno (${scroll.scroll} > ${scroll.client})`);
 await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
 step(`el módulo de texto creció de ${Math.round(heightBefore)} a ${Math.round((await textModule.boundingBox()).height)} px sin barra de desplazamiento`);
+
+// Alto libre: agrandado con el asa inferior por encima del contenido, se conserva aunque se borre texto
+const resizeHeight = async (dy) => {
+  await textModule.hover(); // las asas tienen opacidad 0 hasta pasar el cursor
+  await drag(ana, textModule.locator('.react-resizable-handle-s'), [[0, dy]]);
+};
+const textHeight = async () => (await textModule.boundingBox()).height;
+{
+  const rowsBefore = Math.round((await textHeight()) / 24);
+  const tallSaved = savedNote(ana, (body) => layoutsByType(body).text?.h >= rowsBefore + 3);
+  await resizeHeight(4 * 24);
+  await tallSaved;
+}
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+const tallHeight = await textHeight();
+const oneLineSaved = savedNote(ana, (body) => body.modules.find((m) => m.type === 'text')?.content?.text === 'Línea 1');
+await textArea.fill('Línea 1');
+await oneLineSaved;
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+await ana.waitForTimeout(500); // deja que se vuelva a medir el módulo
+if (!near(await textHeight(), tallHeight, 4)) throw new Error(`el alto libre no se conservó al borrar texto (${Math.round(await textHeight())} y se esperaban ${Math.round(tallHeight)} px)`);
+step(`el alto libre de ${Math.round(tallHeight)} px se conserva al dejar una sola línea`);
+
+// Achicado con el asa hasta el tope del contenido, el módulo vuelve a seguir a su texto y se encoge al borrarlo
+{
+  const shortSaved = savedNote(ana, (body) => layoutsByType(body).text?.h <= 3);
+  await resizeHeight(-tallHeight);
+  await shortSaved;
+}
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+await ana.waitForTimeout(500);
+const minHeight = await textHeight();
+if (minHeight >= tallHeight - 48) throw new Error(`el asa no achicó el módulo de texto (${Math.round(minHeight)} px)`);
+await textArea.fill(Array.from({ length: 6 }, (_, i) => `Línea ${i + 1}`).join('\n'));
+await until(ana, async () => (await textHeight()) > minHeight + 48, 'el módulo de texto no creció al volver a escribir varias líneas');
+const multiHeight = await textHeight();
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+await textArea.fill('Línea 1');
+await until(ana, async () => near(await textHeight(), minHeight, 4), 'el módulo de texto no se encogió al borrar las líneas');
+await ana.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+step(`achicado hasta el tope, el módulo sigue a su texto: ${Math.round(multiHeight)} px con varias líneas y ${Math.round(await textHeight())} px con una`);
 
 // Pantalla angosta: una columna en orden de lectura y sin asas de redimensionar
 await ana.setViewportSize({ width: 390, height: 844 });
