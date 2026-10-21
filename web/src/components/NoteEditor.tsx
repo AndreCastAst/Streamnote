@@ -263,7 +263,7 @@ export const NoteEditor = forwardRef<NoteEditorHandle, Props>(function NoteEdito
       const current = latest.current.modules;
       const resized = current.find((m) => m.id === newItem.i);
       if (!resized) return;
-      const h = resizedHeight(layoutOf(resized).h, oldItem, newItem);
+      const h = resizedHeight(layoutOf(resized).h, oldItem, newItem, measured[newItem.i] ?? 0, resized.type);
       const next = applyGridLayout(current, layout).map((m) => (m.id === newItem.i ? { ...m, layout: { ...layoutOf(m), h } } : m));
       saveLayout(readingOrder(next));
     };

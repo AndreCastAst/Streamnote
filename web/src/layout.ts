@@ -5,6 +5,7 @@ import type { ModuleLayout, ModuleType, NoteModule } from './api';
 export const GRID_COLS = 12; // columnas de la cuadrícula de escritorio
 export const MAX_H = 200; // alto máximo guardado, en filas (lo valida el backend)
 export const ROW_PX = 24; // alto de una fila: coincide con --step de styles.css
+export const MAX_PER_ROW = 4; // máximo de módulos en una fila al repartirla (cada uno queda al menos a 3 columnas)
 
 /** Lo mínimo que se necesita de un elemento del acomodo de react-grid-layout. */
 export interface GridItem {
@@ -13,6 +14,18 @@ export interface GridItem {
   y: number;
   w: number;
   h: number;
+}
+
+/** Celda de la cuadrícula de escritorio bajo el puntero. */
+export interface Cell {
+  col: number;
+  row: number;
+}
+
+/** Resultado de `dropLayout`. */
+export interface Drop<T extends GridItem> {
+  layout: T[];
+  split: boolean;
 }
 
 const heights: Record<ModuleType, number> = { heading: 2, text: 3, quote: 3, checklist: 3, code: 5 };
@@ -70,12 +83,109 @@ export function applyGridLayout(modules: NoteModule[], gridLayout: readonly Grid
 }
 
 /**
- * El `h` que se guarda tras redimensionar: si solo cambió el ancho se conserva el guardado,
- * porque el alto dibujado puede ser el medido; si cambió el alto, se usa el que soltó el usuario.
+ * El `h` que se guarda tras redimensionar (`contentRows`: filas que mide el contenido):
+ * - si solo cambió el ancho, se conserva el guardado, porque el alto dibujado puede ser el medido;
+ * - si el usuario soltó el alto por encima del contenido, se guarda ese alto (espacio libre a propósito);
+ * - si lo soltó en el tope del contenido (con `minH` = filas medidas, «lo achicó todo lo posible»),
+ *   se guarda el menor entre el alto por defecto del tipo y el soltado, para que el módulo vuelva a
+ *   seguir a su contenido y se encoja cuando se borre texto.
  */
-export function resizedHeight(stored: number, oldItem: Pick<GridItem, 'h'>, newItem: Pick<GridItem, 'h'>): number {
-  const h = newItem.h === oldItem.h ? stored : newItem.h;
+export function resizedHeight(
+  stored: number,
+  oldItem: Pick<GridItem, 'h'>,
+  newItem: Pick<GridItem, 'h'>,
+  contentRows: number,
+  type: ModuleType,
+): number {
+  let h: number;
+  if (newItem.h === oldItem.h) h = stored;
+  else if (newItem.h > contentRows) h = newItem.h;
+  else h = Math.min(defaultHeight(type), newItem.h);
   return clamp(Math.round(h), 1, MAX_H);
+}
+
+const widthOf = (row: readonly GridItem[]) => row.reduce((sum, it) => sum + it.w, 0);
+
+/**
+ * Acomodo (sin compactar) para soltar `draggedId`.
+ * - base: acomodo de antes del arrastre, compactado y con los altos dibujados (h = max(guardado, medido)).
+ * - target: posición que propone la librería para el arrastrado (x, y). Aquí no se usa: cuando no se
+ *   reparte, el arrastrado queda en su lugar de partida y lo lleva a `target` el compactador (con `moveElement`).
+ * - cell: celda bajo la sonda del puntero, o null.
+ * Devuelve todos los elementos de `base` (copias, sin mutar `base` y conservando sus demás campos, como `minH`),
+ * con las filas afectadas recolocadas. `split` es verdadero si se repartió la fila de destino o se reordenó
+ * dentro de la propia fila repartida en partes iguales.
+ */
+export function dropLayout<T extends GridItem>(
+  base: readonly T[],
+  draggedId: string,
+  target: { x: number; y: number },
+  cell: Cell | null,
+): Drop<T> {
+  const dragged = base.find((it) => it.i === draggedId);
+  if (!dragged) return { layout: [...base], split: false };
+  const others = base.filter((it) => it.i !== draggedId);
+
+  // Fila de origen: «repartida en partes iguales» si son 2 o más, del mismo ancho, y llenan la fila.
+  const sourceRow = base.filter((it) => it.y === dragged.y);
+  const evenSource = sourceRow.length >= 2 && sourceRow.every((it) => it.w === dragged.w) && widthOf(sourceRow) === GRID_COLS;
+
+  // Módulo bajo el puntero, contra el acomodo de antes del arrastre; en empate, el de menor y y luego menor x.
+  const hovered = cell
+    ? (others
+        .filter((it) => it.x <= cell.col && cell.col < it.x + it.w && it.y <= cell.row && cell.row < it.y + it.h)
+        .sort((a, b) => a.y - b.y || a.x - b.x)[0] ?? null)
+    : null;
+
+  const placed = new Map<string, { x: number; y: number; w: number }>();
+  /** Coloca la secuencia en la fila `y`, repartiendo el ancho en partes iguales y en el orden dado. */
+  const spread = (seq: readonly T[], y: number) => {
+    const w = GRID_COLS / seq.length;
+    seq.forEach((it, k) => placed.set(it.i, { x: k * w, y, w }));
+  };
+
+  let split = false;
+  if (hovered && cell) {
+    const targetRow = others.filter((it) => it.y === hovered.y).sort((a, b) => a.x - b.x);
+    // Solo los tercios izquierdo y derecho reparten; el central mueve arriba o abajo como siempre.
+    const zone = cell.col < hovered.x + hovered.w / 3 ? 'left' : cell.col >= hovered.x + (2 * hovered.w) / 3 ? 'right' : 'center';
+    const index = targetRow.indexOf(hovered) + (zone === 'right' ? 1 : 0);
+    if (zone !== 'center') {
+      const seq = [...targetRow];
+      seq.splice(index, 0, dragged);
+      if (hovered.y !== dragged.y) {
+        // Otra fila: se reparte solo si el arrastrado no cabe y no se pasa del máximo por fila.
+        if (widthOf(targetRow) + dragged.w > GRID_COLS && targetRow.length + 1 <= MAX_PER_ROW) {
+          spread(seq, hovered.y);
+          split = true;
+        }
+      } else if (evenSource) {
+        // Misma fila repartida en partes iguales: se reordena con el mismo ancho para todos.
+        spread(seq, dragged.y);
+        split = true;
+      }
+    }
+  }
+
+  // ¿Salió el arrastrado de su fila? Se decide por la sonda del puntero, no por `target.y`, que la
+  // librería redondea a la fila más cercana. Si se repartió otra fila, `hovered` es de otra fila.
+  // Solo se vuelven a repartir filas de hasta MAX_PER_ROW (quedan 1, 2 o 3): una fila de 6 a 2 columnas,
+  // armada a mano, dejaría 5 y anchos no enteros (12 / 5).
+  const sourceBottom = Math.max(...sourceRow.map((it) => it.y + it.h));
+  const leftSource =
+    (hovered !== null && hovered.y !== dragged.y) || (cell !== null && (cell.row < dragged.y || cell.row >= sourceBottom));
+  if (leftSource && evenSource && sourceRow.length <= MAX_PER_ROW) {
+    spread(
+      sourceRow.filter((it) => it.i !== draggedId).sort((a, b) => a.x - b.x),
+      dragged.y,
+    );
+  }
+
+  const layout = base.map((it) => {
+    const p = placed.get(it.i);
+    return p ? { ...it, x: p.x, y: p.y, w: p.w } : { ...it };
+  });
+  return { layout, split };
 }
 
 /**
