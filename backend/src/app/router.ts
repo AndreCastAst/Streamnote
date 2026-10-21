@@ -6,10 +6,11 @@ import type { Deps } from './deps.js';
 import { identityRoutes } from '../domains/identity.js';
 import { communityRoutes } from '../domains/communities.js';
 import { noteRoutes } from '../domains/notes.js';
+import { folderRoutes } from '../domains/folders.js';
 import { streamRoutes } from '../domains/streams.js';
 import { notificationRoutes } from '../domains/notifications.js';
 
-export const routes: Route[] = [...identityRoutes, ...communityRoutes, ...noteRoutes, ...streamRoutes, ...notificationRoutes];
+export const routes: Route[] = [...identityRoutes, ...communityRoutes, ...noteRoutes, ...folderRoutes, ...streamRoutes, ...notificationRoutes];
 
 export interface RawRequest {
   params: Record<string, string>;

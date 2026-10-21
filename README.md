@@ -45,9 +45,9 @@ Los recursos de mensajería, almacenamiento y notificaciones los crea **Terrafor
 backend/
   migrations/        SQL del esquema (PostgreSQL / Aurora)
   src/core/          adaptadores: base de datos, colas, eventos, S3, DynamoDB, video, tiempo real
-  src/domains/       reglas de negocio: comunidades y permisos, notas, directos, notificaciones
+  src/domains/       reglas de negocio: comunidades y permisos, notas y carpetas, directos, notificaciones
   src/entrypoints/   server (API local), worker, lambda (AWS), migrate, bootstrap-local
-  scripts/smoke.ts   46 comprobaciones de la API
+  scripts/smoke.ts   73 comprobaciones de la API
 web/                 React + Vite
 infra/
   mediamtx/          configuración del servidor de video local

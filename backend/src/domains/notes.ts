@@ -5,8 +5,9 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Deps } from '../app/deps.js';
 import type { Db } from '../core/db.js';
-import { route, requireUser, idParam, badRequest, forbidden, notFound } from '../core/http.js';
-import { canView, requireMember } from './access.js';
+import { route, requireUser, idParam, badRequest, forbidden, notFound, conflict } from '../core/http.js';
+import { canView, getMembership, requireMember } from './access.js';
+import { directosFolder, ownFolder } from './folders.js';
 
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'UUID no válido');
 const str = (max: number) => z.string().max(max);
@@ -61,8 +62,13 @@ export function defaultHeight(type: NoteModule['type']): number {
 const CreateNote = z.object({
   title: z.string().trim().min(1).max(200),
   streamId: uuid.optional(),
+  folderId: uuid.optional(), // se ignora si hay streamId: la nota va a «Directos / [comunidad]»
   modules: z.array(NoteModule).max(500).optional(),
 });
+
+const MoveNote = z.object({ folderId: uuid.nullable() }); // null = raíz
+
+const UnlinkNote = z.object({ version: z.number().int().positive().optional() });
 
 const SaveNote = z.object({
   opId: uuid,
@@ -79,9 +85,22 @@ export interface NoteWriteMessage extends SaveNote {
 
 const MAX_NOTE_BYTES = 200_000; // margen bajo el límite de un mensaje de SQS
 
-async function loadNote(db: Db, id: string) {
-  const note = await db.one<{ id: string; owner_id: string; title: string; version: string; stream_id: string | null; updated_at: string }>(
-    'SELECT id, owner_id, title, version, stream_id, updated_at FROM notes WHERE id = :id::uuid AND deleted_at IS NULL',
+interface NoteRow {
+  id: string;
+  owner_id: string;
+  title: string;
+  version: string;
+  stream_id: string | null;
+  updated_at: string;
+  folder_id: string | null;
+  community_id: string | null; // vinculada: los miembros de la comunidad la leen
+  locked: boolean; // copia congelada: nadie la edita
+}
+
+async function loadNote(db: Db, id: string): Promise<NoteRow> {
+  const note = await db.one<NoteRow>(
+    `SELECT id, owner_id, title, version, stream_id, updated_at, folder_id, community_id, locked
+     FROM notes WHERE id = :id::uuid AND deleted_at IS NULL`,
     { id },
   );
   if (!note) throw notFound('La nota no existe');
@@ -113,11 +132,16 @@ async function loadModules(db: Db, noteId: string) {
   }));
 }
 
-/** El dueño puede editar; los miembros de una comunidad con la que se compartió pueden leer. */
-async function readAccess(db: Db, noteId: string, ownerId: string, userId: string) {
-  if (ownerId === userId) return 'edit' as const;
-  const shares = await db.query<{ community_id: string }>('SELECT community_id FROM note_shares WHERE note_id = :n::uuid', { n: noteId });
-  for (const s of shares) if (await canView(db, s.community_id, userId)) return 'read' as const;
+/**
+ * El dueño puede editar (salvo una copia congelada, que solo lee); pueden leer quienes ven una
+ * comunidad con la que se compartió y los miembros (solo miembros, también en las públicas) de la
+ * comunidad a la que está vinculada.
+ */
+async function readAccess(db: Db, note: NoteRow, userId: string): Promise<'edit' | 'read' | null> {
+  if (note.owner_id === userId) return note.locked ? 'read' : 'edit';
+  const shares = await db.query<{ community_id: string }>('SELECT community_id FROM note_shares WHERE note_id = :n::uuid', { n: note.id });
+  for (const s of shares) if (await canView(db, s.community_id, userId)) return 'read';
+  if (note.community_id && (await getMembership(db, note.community_id, userId))) return 'read';
   return null;
 }
 
@@ -188,10 +212,27 @@ export const noteRoutes = [
     async handler(req, { db }) {
       const user = requireUser(req);
       const b = req.body as z.infer<typeof CreateNote>;
+      // Nota de un directo: va a «Directos / [comunidad]» y, si el autor es miembro, queda vinculada
+      let stream: { community_id: string; name: string } | undefined;
+      let communityId: string | null = null;
+      if (b.streamId) {
+        stream = await db.one<{ community_id: string; name: string }>(
+          'SELECT s.community_id, c.name FROM stream_sessions s JOIN communities c ON c.id = s.community_id WHERE s.id = :id::uuid',
+          { id: b.streamId },
+        );
+        if (!stream) throw notFound('El directo no existe');
+        if (!(await canView(db, stream.community_id, user.id))) throw forbidden('No tienes acceso a este directo');
+        if (await getMembership(db, stream.community_id, user.id)) communityId = stream.community_id;
+      } else if (b.folderId) {
+        await ownFolder(db, user.id, b.folderId);
+      }
       const note = await db.tx(async (tx) => {
+        const folderId = stream ? await directosFolder(tx, user.id, stream.community_id, stream.name) : (b.folderId ?? null);
         const n = await tx.one<{ id: string }>(
-          `INSERT INTO notes (owner_id, title, stream_id) VALUES (:u::uuid, :title, :stream::uuid) RETURNING id, title, version, created_at`,
-          { u: user.id, title: b.title, stream: b.streamId ?? null },
+          `INSERT INTO notes (owner_id, title, stream_id, folder_id, community_id)
+           VALUES (:u::uuid, :title, :stream::uuid, :folder::uuid, :community::uuid)
+           RETURNING id, title, version, created_at`,
+          { u: user.id, title: b.title, stream: b.streamId ?? null, folder: folderId, community: communityId },
         );
         await insertModules(tx, n!.id, b.modules?.length ? b.modules : [emptyText()]);
         return n;
@@ -207,13 +248,16 @@ export const noteRoutes = [
     async handler(req, { db }) {
       const user = requireUser(req);
       const note = await loadNote(db, idParam(req));
-      const access = await readAccess(db, note.id, note.owner_id, user.id);
+      const access = await readAccess(db, note, user.id);
       if (!access) throw forbidden('No tienes acceso a esta nota');
       const author = await db.one<{ display_name: string }>('SELECT display_name FROM users WHERE id = :u::uuid', { u: note.owner_id });
       const shares = await db.query(
         `SELECT c.id, c.name FROM note_shares s JOIN communities c ON c.id = s.community_id WHERE s.note_id = :n::uuid`,
         { n: note.id },
       );
+      const community = note.community_id
+        ? await db.one<{ id: string; name: string }>('SELECT id, name FROM communities WHERE id = :c::uuid', { c: note.community_id })
+        : undefined;
       return {
         id: note.id,
         title: note.title,
@@ -221,7 +265,11 @@ export const noteRoutes = [
         streamId: note.stream_id,
         updatedAt: note.updated_at,
         author: author?.display_name,
-        canEdit: access === 'edit',
+        canEdit: access === 'edit', // falso en una copia congelada, también para su autor
+        isOwner: note.owner_id === user.id,
+        locked: note.locked,
+        folderId: note.folder_id,
+        community: community ?? null,
         sharedWith: access === 'edit' ? shares : [],
         modules: await loadModules(db, note.id),
       };
@@ -240,12 +288,75 @@ export const noteRoutes = [
       const b = req.body as SaveNote;
       const note = await loadNote(db, id);
       if (note.owner_id !== user.id) throw forbidden('Solo el autor puede editar esta nota');
+      if (note.locked) throw conflict('La nota está congelada');
       const ids = new Set(b.modules.map((m) => m.id));
       if (ids.size !== b.modules.length) throw badRequest('Hay módulos con el mismo id');
       const message: NoteWriteMessage = { ...b, noteId: id, userId: user.id };
       if (Buffer.byteLength(JSON.stringify(message)) > MAX_NOTE_BYTES) throw badRequest('La nota es demasiado grande');
       await queue.send(cfg.resources.noteWritesQueueUrl, message);
       return { status: 202, body: { accepted: true, version: b.version } };
+    },
+  }),
+
+  // Mover a otra carpeta propia (o a la raíz). No pasa por la cola: no toca version ni updated_at.
+  route({
+    method: 'PATCH',
+    path: '/notes/:id',
+    auth: 'user',
+    body: MoveNote,
+    async handler(req, { db }) {
+      const user = requireUser(req);
+      const note = await loadNote(db, idParam(req));
+      if (note.owner_id !== user.id) throw forbidden();
+      const { folderId } = req.body as z.infer<typeof MoveNote>;
+      if (folderId) await ownFolder(db, user.id, folderId);
+      await db.query('UPDATE notes SET folder_id = :f::uuid WHERE id = :n::uuid', { f: folderId, n: note.id });
+      return { id: note.id, folderId };
+    },
+  }),
+
+  // Desligar de la comunidad: la nota queda solo para su autor y la comunidad se queda con una
+  // copia congelada de este momento, en «Directos / [comunidad]» del autor.
+  route({
+    method: 'POST',
+    path: '/notes/:id/unlink',
+    auth: 'user',
+    body: UnlinkNote,
+    async handler(req, { db }) {
+      const user = requireUser(req);
+      const note = await loadNote(db, idParam(req));
+      if (note.owner_id !== user.id) throw forbidden('Solo el autor puede desligar la nota');
+      const communityId = note.community_id;
+      if (!communityId) throw badRequest('La nota no está vinculada a una comunidad');
+      if (note.locked) throw badRequest('Una copia congelada no se puede desligar');
+      if (note.stream_id) {
+        const s = await db.one<{ status: string }>('SELECT status FROM stream_sessions WHERE id = :s::uuid', { s: note.stream_id });
+        if (s?.status === 'live') throw conflict('Desliga la nota cuando termine el directo');
+      }
+      // El cliente manda la última versión que envió: si la cola aún no la aplicó, la copia saldría sin esos cambios
+      const { version } = req.body as z.infer<typeof UnlinkNote>;
+      if (version !== undefined && version > Number(note.version)) throw conflict('La nota todavía se está guardando; intenta en un momento');
+      const frozenId = await db.tx(async (tx) => {
+        // Primero la original: si dos pedidos llegan a la vez, el segundo espera el bloqueo y ya no la encuentra vinculada
+        const released = await tx.one(
+          `UPDATE notes SET community_id = NULL, stream_id = NULL
+           WHERE id = :n::uuid AND community_id = :c::uuid AND NOT locked AND deleted_at IS NULL RETURNING id`,
+          { n: note.id, c: communityId },
+        );
+        if (!released) throw conflict('La nota ya no está vinculada a la comunidad');
+        await tx.query('DELETE FROM note_shares WHERE note_id = :n::uuid AND community_id = :c::uuid', { n: note.id, c: communityId });
+        const c = await tx.one<{ name: string }>('SELECT name FROM communities WHERE id = :c::uuid', { c: communityId });
+        const folder = await directosFolder(tx, user.id, communityId, c?.name ?? 'Comunidad');
+        const frozen = await tx.one<{ id: string }>(
+          `INSERT INTO notes (owner_id, title, stream_id, community_id, locked, folder_id)
+           VALUES (:u::uuid, :t, :s::uuid, :c::uuid, true, :f::uuid) RETURNING id`,
+          { u: user.id, t: note.title, s: note.stream_id, c: communityId, f: folder },
+        );
+        // Los módulos tal cual (mismos ids: la clave es (note_id, id)), con su acomodo y su trazabilidad
+        await insertModules(tx, frozen!.id, (await loadModules(tx, note.id)) as NoteModule[]);
+        return frozen!.id;
+      });
+      return { id: note.id, frozenId };
     },
   }),
 
@@ -271,7 +382,7 @@ export const noteRoutes = [
     async handler(req, { db }) {
       const user = requireUser(req);
       const note = await loadNote(db, idParam(req));
-      if (!(await readAccess(db, note.id, note.owner_id, user.id))) throw forbidden();
+      if (!(await readAccess(db, note, user.id))) throw forbidden();
       const author = await db.one<{ display_name: string }>('SELECT display_name FROM users WHERE id = :u::uuid', { u: note.owner_id });
       const modules = (await loadModules(db, note.id)).map((m) => ({
         ...m,
@@ -280,6 +391,7 @@ export const noteRoutes = [
         sourceAuthor: m.sourceAuthor ?? author?.display_name ?? null,
       })) as NoteModule[];
       const copy = await db.tx(async (tx) => {
+        // Sin folder_id, community_id ni locked: la copia va a la raíz, privada y editable
         const n = await tx.one<{ id: string }>(`INSERT INTO notes (owner_id, title) VALUES (:u::uuid, :t) RETURNING id, title`, {
           u: user.id,
           t: `${note.title} (copia)`,

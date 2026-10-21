@@ -243,7 +243,8 @@ export const communityRoutes = [
     },
   }),
 
-  // Apuntes compartidos con la comunidad
+  // Apuntes de la comunidad: los compartidos a mano y, solo para sus miembros, los vinculados
+  // (notas de sus directos y copias congeladas). Una sola consulta sobre notes, sin duplicados.
   route({
     method: 'GET',
     path: '/communities/:id/notes',
@@ -252,13 +253,20 @@ export const communityRoutes = [
       const user = requireUser(req);
       const id = idParam(req);
       if (!(await canView(db, id, user.id))) throw forbidden();
+      const member = !!(await getMembership(db, id, user.id));
       return db.query(
-        `SELECT n.id, n.title, n.updated_at, u.display_name AS author, s.shared_at,
-                (SELECT count(*)::int FROM note_modules nm WHERE nm.note_id = n.id) AS modules
-         FROM note_shares s JOIN notes n ON n.id = s.note_id JOIN users u ON u.id = n.owner_id
-         WHERE s.community_id = :c::uuid AND n.deleted_at IS NULL
-         ORDER BY s.shared_at DESC`,
-        { c: id },
+        `SELECT n.id, n.title, n.updated_at, u.display_name AS author, n.locked,
+                coalesce((SELECT s.shared_at FROM note_shares s WHERE s.note_id = n.id AND s.community_id = :c::uuid), n.created_at) AS shared_at,
+                (SELECT count(*)::int FROM note_modules nm WHERE nm.note_id = n.id) AS modules,
+                CASE WHEN ss.id IS NULL THEN NULL ELSE json_build_object('id', ss.id, 'title', ss.title) END AS stream
+         FROM notes n
+         JOIN users u ON u.id = n.owner_id
+         LEFT JOIN stream_sessions ss ON ss.id = n.stream_id
+         WHERE n.deleted_at IS NULL
+           AND ((n.community_id = :c::uuid AND :member::boolean)
+                OR EXISTS (SELECT 1 FROM note_shares s WHERE s.note_id = n.id AND s.community_id = :c::uuid))
+         ORDER BY shared_at DESC`,
+        { c: id, member },
       );
     },
   }),

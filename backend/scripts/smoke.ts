@@ -155,9 +155,59 @@ ok(
   'la copia conserva el acomodo de cada módulo',
 );
 
+// ---- Carpetas ----
+const files = async (token: string) => (await call(token, 'GET', '/files')).body as { folders: any[]; items: any[] };
+const calc = (await call(beto.token, 'POST', '/folders', { name: 'Cálculo' })).body;
+const p1 = (await call(beto.token, 'POST', '/folders', { name: 'Parcial 1', parentId: calc.id })).body;
+const tree1 = await files(beto.token);
+ok(
+  tree1.folders.some((f) => f.id === calc.id && f.parentId === null && f.kind === 'user') && tree1.folders.some((f) => f.id === p1.id && f.parentId === calc.id),
+  'Beto crea «Cálculo» y dentro «Parcial 1»',
+);
+ok((await call(beto.token, 'POST', '/folders', { name: 'cálculo' })).status === 409, 'otra «cálculo» en la raíz (sin distinguir mayúsculas) → 409');
+ok((await call(beto.token, 'PATCH', `/folders/${calc.id}`, { parentId: p1.id })).status === 400, 'no se puede mover una carpeta dentro de su descendiente');
+const inP1 = (await call(beto.token, 'POST', '/notes', { title: 'Límites', folderId: p1.id })).body;
+ok((await files(beto.token)).items.some((i) => i.id === inP1.id && i.kind === 'note' && i.folderId === p1.id), 'una nota creada con folderId queda en esa carpeta');
+const versionBefore = (await call(beto.token, 'GET', `/notes/${inP1.id}`)).body.version;
+const movedNote = await call(beto.token, 'PATCH', `/notes/${inP1.id}`, { folderId: null });
+const versionAfter = (await call(beto.token, 'GET', `/notes/${inP1.id}`)).body.version;
+ok(
+  movedNote.status === 200 && (await files(beto.token)).items.some((i) => i.id === inP1.id && i.folderId === null) && versionAfter === versionBefore,
+  'mover la nota a la raíz no cambia su versión',
+);
+ok((await call(ana.token, 'POST', '/notes', { title: 'Intrusa', folderId: p1.id })).status === 404, 'Ana no puede crear notas en una carpeta de Beto');
+ok(!(await files(ana.token)).folders.some((f) => f.id === calc.id || f.id === p1.id), 'Ana no ve las carpetas de Beto');
+await call(beto.token, 'POST', '/notes', { title: 'Derivadas', folderId: calc.id });
+await call(beto.token, 'POST', '/notes', { title: 'Ejercicio 1', folderId: p1.id });
+await call(beto.token, 'POST', '/notes', { title: 'Ejercicio 2', folderId: p1.id });
+ok((await call(beto.token, 'DELETE', `/folders/${calc.id}`)).status === 409, 'una carpeta con contenido no se puede eliminar');
+const emptiedCalc = await call(beto.token, 'POST', `/folders/${calc.id}/empty`);
+ok(
+  emptiedCalc.body?.deleted === 1 && (await files(beto.token)).items.filter((i) => i.folderId === p1.id).length === 2,
+  'vaciar «Cálculo» borra solo su nota directa; las de «Parcial 1» siguen',
+);
+ok((await call(beto.token, 'POST', `/folders/${p1.id}/empty`)).body?.deleted === 2, 'vaciar «Parcial 1» borra sus dos notas');
+ok((await call(beto.token, 'DELETE', `/folders/${p1.id}`)).status === 200, 'se elimina «Parcial 1» ya vacía');
+ok((await call(beto.token, 'DELETE', `/folders/${calc.id}`)).status === 200, 'se elimina «Cálculo» aunque una nota borrada la referenciaba');
+ok(!(await files(beto.token)).folders.some((f) => f.id === calc.id || f.id === p1.id), 'las carpetas eliminadas ya no aparecen');
+
 // ---- Directo: módulos compartidos y chat ----
 const stream = (await call(beto.token, 'POST', `/communities/${c.id}/streams`, { title: 'Repaso de integrales' })).body;
 ok(stream.id, 'Beto inicia un directo con el permiso concedido');
+const liveNote = (await call(beto.token, 'POST', '/notes', { title: 'Apuntes del directo', streamId: stream.id })).body;
+const liveTree = await files(beto.token);
+const commFolder = liveTree.folders.find((f) => f.id === liveTree.items.find((i) => i.id === liveNote.id)?.folderId);
+const directosFolder = liveTree.folders.find((f) => f.id === commFolder?.parentId);
+ok(
+  commFolder?.kind === 'community' && commFolder.communityId === c.id && directosFolder?.kind === 'directos' && directosFolder.parentId === null,
+  'la nota del directo queda en «Directos / [comunidad]»',
+);
+const liveView = (await call(beto.token, 'GET', `/notes/${liveNote.id}`)).body;
+ok(liveView.community?.id === c.id && liveView.isOwner === true && liveView.canEdit === true, 'la nota del directo queda vinculada a la comunidad');
+ok((await call(ana.token, 'GET', `/notes/${liveNote.id}`)).body.canEdit === false, 'Ana (miembro) lee la nota vinculada sin poder editarla');
+const linked = (await call(ana.token, 'GET', `/communities/${c.id}/notes`)).body;
+ok(linked.some((n: any) => n.id === liveNote.id && n.stream?.id === stream.id && n.locked === false), 'la nota vinculada aparece en la comunidad con su directo');
+ok((await call(beto.token, 'POST', '/notes', { title: 'Sin directo', streamId: randomUUID() })).status === 404, 'una nota para un directo inexistente → 404');
 ok((await call(beto.token, 'POST', `/communities/${c.id}/streams`, { title: 'Otro' })).status === 409, 'no puede abrir dos directos a la vez');
 const sAna = (await call(ana.token, 'GET', `/streams/${stream.id}`)).body;
 const sBeto = (await call(beto.token, 'GET', `/streams/${stream.id}`)).body;
@@ -184,8 +234,31 @@ await call(ana.token, 'POST', `/streams/${stream.id}/chat`, { text: '¿Se ve bie
 await until(async () => inbox, (m) => m.some((x) => x.type === 'chat.message'));
 ok(inbox.some((x) => x.type === 'chat.message'), 'el chat llega en tiempo real');
 ok((await call(ana.token, 'GET', `/streams/${stream.id}/modules`)).body.length === 1, 'los módulos compartidos quedan en la sesión');
+ok((await call(beto.token, 'POST', `/notes/${liveNote.id}/unlink`)).status === 409, 'no se puede desligar la nota con el directo en vivo');
 ok((await call(beto.token, 'POST', `/streams/${stream.id}/end`)).status === 200, 'Beto termina el directo');
 ok((await auth('publish', pubToken)).status === 401, 'tras terminar ya no se puede volver a emitir');
+const early = await call(beto.token, 'POST', `/notes/${liveNote.id}/unlink`, { version: liveView.version + 5 });
+ok(early.status === 409 && !(await files(beto.token)).items.some((i) => i.locked), 'desligar con una versión aún sin guardar → 409 y no crea copia');
+const unlinked = await call(beto.token, 'POST', `/notes/${liveNote.id}/unlink`, { version: liveView.version });
+ok(unlinked.status === 200 && unlinked.body.frozenId, 'Beto desliga la nota tras el directo');
+const frozenId = unlinked.body.frozenId;
+ok((await call(beto.token, 'GET', `/notes/${liveNote.id}`)).body.community === null, 'la original queda sin vínculo');
+ok((await call(ana.token, 'GET', `/notes/${liveNote.id}`)).status === 403, 'Ana ya no puede leer la original');
+ok((await call(ana.token, 'GET', `/notes/${frozenId}`)).body.canEdit === false, 'Ana lee la copia congelada');
+const frozen = (await call(beto.token, 'GET', `/notes/${frozenId}`)).body;
+ok(
+  frozen.canEdit === false && frozen.isOwner === true && frozen.locked === true && frozen.folderId === commFolder?.id,
+  'Beto ve su copia congelada en solo lectura, en «Directos / [comunidad]»',
+);
+ok(
+  (await call(beto.token, 'PUT', `/notes/${frozenId}`, { opId: randomUUID(), version: frozen.version + 1, title: 'Cambio', modules: [] })).status === 409,
+  'ni el autor puede editar la copia congelada',
+);
+const afterUnlink = (await call(ana.token, 'GET', `/communities/${c.id}/notes`)).body;
+ok(
+  afterUnlink.some((n: any) => n.id === frozenId && n.locked === true) && !afterUnlink.some((n: any) => n.id === liveNote.id),
+  'la comunidad ve la copia congelada y ya no la original',
+);
 
 // ---- Recordatorios ----
 const rem = await call(beto.token, 'POST', '/reminders', { title: 'Repasar integrales', fireAt: new Date(Date.now() + 2000).toISOString() });
