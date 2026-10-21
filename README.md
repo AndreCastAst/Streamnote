@@ -88,7 +88,7 @@ cd e2e && npm install && npx playwright install chromium && npm test         # n
 
 ## Desarrollo sin Docker
 
-Necesitas Node 22.18 o superior, PostgreSQL 16, `pip install "moto[server]"` y el binario de [MediaMTX](https://github.com/bluenviron/mediamtx/releases).
+Necesitas Node 22.18 o superior (en la rama 23, la 23.6 o superior), PostgreSQL 16, `pip install "moto[server]"` y el binario de [MediaMTX](https://github.com/bluenviron/mediamtx/releases).
 
 ```bash
 moto_server -p 5000 &
