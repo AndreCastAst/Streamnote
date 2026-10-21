@@ -326,11 +326,14 @@ table.members { width: 100%; border-collapse: collapse; }
 }
 .sheet.readonly .sheet-head, .sheet.readonly .modules, .sheet.readonly .empty-note { position: relative; z-index: 1; }
 @media (prefers-reduced-transparency: reduce) { .sheet.readonly::after { display: none; } }
+/* Aviso fijo abajo en la pantalla: no tapa el encabezado y se ve aunque la nota sea larga */
 .sheet .readonly-notice {
-  position: absolute;
-  top: 8px;
-  right: 12px;
-  z-index: 3;
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  z-index: 30;
   margin: 0;
   padding: 6px 12px;
   font-size: 0.875rem;
