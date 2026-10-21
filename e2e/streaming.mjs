@@ -1,10 +1,11 @@
 import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 // Prueba de punta a punta con dos navegadores y cámara simulada. Requiere la app corriendo.
 //   cd e2e && npm install && npx playwright install chromium && npm test
 const WEB = process.env.WEB_URL ?? 'http://localhost:5173';
-const shots = new URL('./capturas', import.meta.url).pathname;
+const shots = fileURLToPath(new URL('./capturas', import.meta.url)); // ruta válida también en Windows
 mkdirSync(shots, { recursive: true });
 const run = Math.random().toString(36).slice(2, 7);
 const step = (m) => console.log(`• ${m}`);
