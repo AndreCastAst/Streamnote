@@ -45,8 +45,10 @@ const code = (await ana.locator('.invite .code').textContent()).trim();
 step(`comunidad creada, código ${code}`);
 
 // Beto se une con el código
-await beto.getByRole('textbox', { name: 'Código de invitación' }).fill(code);
-await beto.getByRole('button', { name: 'Unirme', exact: true }).click();
+// Se busca el botón dentro del formulario del código: la lista de comunidades públicas también tiene botones «Unirme»
+const joinForm = beto.locator('form').filter({ has: beto.getByRole('textbox', { name: 'Código de invitación' }) });
+await joinForm.getByRole('textbox', { name: 'Código de invitación' }).fill(code);
+await joinForm.getByRole('button', { name: 'Unirme', exact: true }).click();
 await beto.getByRole('tab', { name: 'Miembros' }).waitFor();
 step('Beto se unió');
 
