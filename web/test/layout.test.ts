@@ -133,6 +133,29 @@ test('dropLayout 10: no muta base y conserva los campos extra (minH)', () => {
   assert.equal(r.layout.find((it) => it.i === 'B')?.minH, 4);
 });
 
+test('dropLayout 11: en una fila no repartida en partes iguales, el tercio lateral de un vecino no reordena', () => {
+  const base = [item('A', 0, 0, 8), item('B', 8, 0, 4)];
+  const r = dropLayout(base, 'B', { x: 0, y: 0 }, { col: 1, row: 1 });
+  assert.equal(r.split, false);
+  unchanged(r.layout, base);
+});
+
+test('dropLayout 12: el tercio central de un vecino dentro de una fila repartida no reordena', () => {
+  const base = [item('A', 0, 0, 6), item('B', 6, 0, 6)];
+  const r = dropLayout(base, 'B', { x: 3, y: 0 }, { col: 3, row: 1 });
+  assert.equal(r.split, false);
+  unchanged(r.layout, base);
+});
+
+test('dropLayout 13: el tercio central de un módulo de otra fila no reparte, pero la fila de origen repartida se vuelve a repartir', () => {
+  const base = [item('A', 0, 0, 6), item('B', 6, 0, 6), item('C', 0, 3, 12)];
+  const r = dropLayout(base, 'B', { x: 0, y: 4 }, { col: 6, row: 4 });
+  assert.equal(r.split, false);
+  assert.deepEqual(pos(r.layout, 'A'), { x: 0, y: 0, w: 12 });
+  assert.deepEqual(pos(r.layout, 'B'), { x: 6, y: 0, w: 6 });
+  assert.deepEqual(pos(r.layout, 'C'), { x: 0, y: 3, w: 12 });
+});
+
 test('resizedHeight: si solo cambió el ancho se conserva el alto guardado', () => {
   assert.equal(resizedHeight(7, { h: 9 }, { h: 9 }, 9, 'text'), 7);
 });
