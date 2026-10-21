@@ -140,8 +140,134 @@ async function toHalfWidth(page, module) {
   await until(page, async () => near((await module.boundingBox()).width, grid.width / 2 - 4, 3), 'el módulo no quedó a media anchura');
 }
 
+// ---- Explorador de archivos y pestañas ----
+
+// `treeitem` de una carpeta o nota por su nombre exacto (dentro de `within` si se pasa). El nombre accesible
+// es solo el de la carpeta o el título: «Física» no choca con la carpeta de la comunidad «Física I …»
+const treeItem = (page, name, within) => (within ?? page).getByRole('treeitem', { name, exact: true });
+const tabList = (page) => page.getByRole('tablist', { name: 'Notas abiertas' });
+
+// Expande la carpeta `name` y devuelve su `treeitem`. El expandido se recuerda por navegador y pulsar una
+// carpeta abierta la cierra: solo se pulsa si está contraída, y tras cada pulsación se espera a que se abra
+// antes de volver a pulsar (si no, un dibujo lento la cerraría otra vez). Se pulsa el nombre de su propia
+// fila (el centro del `treeitem` puede caer sobre sus hijos)
+async function expand(page, name, within) {
+  const folder = treeItem(page, name, within);
+  await folder.waitFor();
+  const open = async () => (await folder.getAttribute('aria-expanded')) === 'true';
+  for (let i = 0; i < 3 && !(await open()); i++) {
+    await folder.locator('.tree-name').first().click();
+    await until(page, open, '', 3000).catch(() => undefined);
+  }
+  if (!(await open())) throw new Error(`la carpeta «${name}» no se expandió`);
+  return folder;
+}
+
+// «Nueva carpeta» en la carpeta seleccionada, con el nombre escrito en el campo y Enter
+async function newFolder(page, name) {
+  await page.getByRole('button', { name: 'Nueva carpeta', exact: true }).click();
+  const field = page.getByRole('textbox', { name: 'Nombre de la carpeta' });
+  await field.fill(name);
+  await field.press('Enter');
+}
+
+// Pulsa «Nueva nota» y espera a que la nota creada sea la pestaña activa con su hoja cargada. `/notas` abre
+// la última pestaña guardada, así que la hoja de otra nota puede estar a la vista antes de crearla
+async function newNote(page) {
+  const created = page.waitForResponse(
+    (r) => r.request().method() === 'POST' && /\/notes$/.test(new URL(r.url()).pathname),
+    { timeout: 15000 },
+  );
+  await page.getByRole('button', { name: 'Nueva nota', exact: true }).click();
+  const res = await created;
+  if (!res.ok()) throw new Error(`crear la nota respondió ${res.status()}`);
+  const { id } = await res.json();
+  await page.waitForURL((u) => u.pathname === `/notes/${id}`);
+  await tabList(page).getByRole('tab', { name: 'Nota sin título', exact: true, selected: true }).waitFor();
+  const title = page.getByLabel('Título de la nota');
+  await until(page, async () => (await title.inputValue({ timeout: 1000 }).catch(() => null)) === 'Nota sin título', 'la hoja de la nota nueva no cargó');
+  return id;
+}
+
+// Escribe el título de la hoja y espera su guardado
+async function setNoteTitle(page, title) {
+  const saved = savedNote(page, (body) => body.title === title);
+  await page.getByLabel('Título de la nota').fill(title);
+  await saved;
+  await page.locator('.sheet .save-status.saved').waitFor({ timeout: 10000 });
+}
+
+// «Acciones de …» → «Mover a…» → la carpeta `dest` → «Mover». Los destinos se eligen por nombre exacto
+async function moveTo(page, name, dest, within) {
+  await (within ?? page).getByRole('button', { name: `Acciones de ${name}`, exact: true }).click();
+  await page.getByRole('menu', { name: `Acciones de ${name}`, exact: true }).getByRole('menuitem', { name: 'Mover a…', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: `Mover “${name}” a…`, exact: true });
+  await dialog.getByRole('radio', { name: dest, exact: true }).check();
+  await dialog.getByRole('button', { name: 'Mover', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+}
+
+// Ana arma «Física / Unidad 1», crea notas, las mueve y trabaja con pestañas
+const titleA = `Apunte A ${run}`;
+const titleB = `Apunte B ${run}`;
+const openTabs = tabList(ana).getByRole('tab');
+const tabCount = (n) => until(ana, async () => (await openTabs.count()) === n, `no hay ${n} pestañas abiertas`);
+
 await ana.goto(`${WEB}/notas`);
-await ana.getByRole('button', { name: 'Nueva nota' }).click();
+await ana.getByText('Crea tu primera nota o carpeta').waitFor();
+step('«Mis notas» empieza vacía');
+await newFolder(ana, 'Física');
+const fisica = treeItem(ana, 'Física');
+await fisica.waitFor();
+await expand(ana, 'Física'); // pulsada queda seleccionada: lo nuevo se crea dentro
+await newFolder(ana, 'Unidad 1');
+const unidad = treeItem(ana, 'Unidad 1', fisica);
+await unidad.waitFor();
+step('Ana creó «Física» y dentro «Unidad 1» desde el panel');
+
+const noteA = await newNote(ana); // se crea en «Unidad 1», la carpeta seleccionada
+await setNoteTitle(ana, titleA);
+await treeItem(ana, titleA, unidad).waitFor();
+step(`«${titleA}» quedó dentro de «Unidad 1»`);
+
+await moveTo(ana, titleA, 'Física');
+await until(
+  ana,
+  async () => (await treeItem(ana, titleA, fisica).count()) === 1 && (await treeItem(ana, titleA, unidad).count()) === 0,
+  `«${titleA}» no pasó de «Unidad 1» a «Física»`,
+);
+step(`con «Mover a…», «${titleA}» pasó a «Física»`);
+
+const noteB = await newNote(ana);
+await setNoteTitle(ana, titleB);
+await tabCount(2);
+await tabList(ana).getByRole('tab', { name: titleB, exact: true, selected: true }).waitFor();
+step('con otra nota nueva hay dos pestañas y la nueva está activa');
+
+await ana.getByRole('button', { name: `Cerrar ${titleB}`, exact: true }).click();
+await ana.waitForURL((u) => u.pathname === `/notes/${noteA}`);
+await tabCount(1);
+await tabList(ana).getByRole('tab', { name: titleA, exact: true, selected: true }).waitFor();
+step('al cerrar la pestaña activa queda la otra, activa');
+
+await treeItem(ana, titleB).locator('.tree-name').click();
+await ana.waitForURL((u) => u.pathname === `/notes/${noteB}`);
+await tabCount(2);
+await tabList(ana).getByRole('tab', { name: titleB, exact: true, selected: true }).waitFor();
+step('abierta desde el árbol, vuelve como pestaña activa');
+
+// Se comprueban por nota y no por título: el título de B pasa por la cola de guardado y puede no haber
+// llegado todavía al servidor cuando la página recargada lo pide
+await ana.reload();
+const tabState = () => openTabs.evaluateAll((ts) => ts.map((t) => `${t.dataset.id}:${t.getAttribute('aria-selected')}`).join(' '));
+await until(ana, async () => (await tabState()) === `${noteA}:false ${noteB}:true`, 'tras recargar no siguen las dos pestañas con la de B activa');
+if (new URL(ana.url()).pathname !== `/notes/${noteB}`) throw new Error(`tras recargar, la URL no es la de la pestaña activa: ${ana.url()}`);
+await ana.screenshot({ path: `${shots}/01a-explorador.png` });
+step('tras recargar siguen las dos pestañas, con la misma activa');
+
+// `/notas` abre la pestaña guardada: se espera a que la nota nueva sea la activa antes de usar la hoja
+await ana.goto(`${WEB}/notas`);
+await newNote(ana);
 await ana.locator('.sheet .module-text').waitFor();
 await ana.getByLabel('Título de la nota').fill(noteTitle);
 await ana.locator('.sheet .add-bar').getByRole('button', { name: 'Código', exact: true }).click();
@@ -462,12 +588,84 @@ await rec.getByRole('button', { name: 'Conservar' }).click();
 await rec.locator('.rec-state.kept').waitFor();
 step(`conservada: ${(await rec.locator('.rec-state').textContent()).trim()}`);
 
-// La nota de Beto en "Mis notas"
+// La nota de Beto en «Mis notas»: está en «Directos / [comunidad]»
+const liveTitle = 'Cinemática: MRUV';
 await beto.goto(`${WEB}/notas`);
-await beto.getByText('tomada en un directo').first().click();
+const betoCommunity = await expand(beto, communityName, await expand(beto, 'Directos'));
+const betoLive = treeItem(beto, liveTitle, betoCommunity);
+const betoLiveId = await betoLive.locator('.tree-row').getAttribute('data-id');
+await betoLive.locator('.tree-name').click();
+await beto.waitForURL((u) => u.pathname === `/notes/${betoLiveId}`);
 await beto.locator('.sheet .highlight-tag').first().waitFor();
 await beto.screenshot({ path: `${shots}/06-nota-beto.png` });
-step('la nota del directo quedó en Mis notas de Beto');
+step('la nota del directo de Beto está en «Directos / Física I …» de su árbol');
+
+// La nota del directo de Ana: en «Directos / [comunidad]», vinculada y visible para los miembros
+await ana.goto(`${WEB}/notas`);
+const anaCommunity = await expand(ana, communityName, await expand(ana, 'Directos'));
+const anaLive = treeItem(ana, liveTitle, anaCommunity);
+await anaLive.waitFor();
+const anaLiveId = await anaLive.locator('.tree-row').getAttribute('data-id');
+step('la nota del directo de Ana está en «Directos / Física I …» de su árbol');
+
+// Beto la ve en «Apuntes compartidos» con «Directo: …» (su propia nota del directo también está: se
+// distingue por la autora) y la abre en solo lectura
+const anaLiveRow = beto.locator('a.row-link').filter({ hasText: `Directo: ${liveTitle}` }).filter({ hasText: 'Ana Torres' });
+await beto.goto(`${WEB}${communityUrl}`);
+await beto.getByRole('tab', { name: 'Apuntes compartidos' }).click();
+await anaLiveRow.waitFor();
+await anaLiveRow.click();
+await beto.waitForURL((u) => u.pathname === `/notes/${anaLiveId}`);
+await beto.locator('.sheet.readonly').waitFor();
+step('Beto ve la nota del directo de Ana en «Apuntes compartidos» («Directo: …») y la abre en solo lectura');
+
+// Ana la pasa a su carpeta «Física»: sigue vinculada, con la etiqueta «de [comunidad]»
+await moveTo(ana, liveTitle, 'Física', anaCommunity);
+await expand(ana, 'Física');
+const movedLive = treeItem(ana, liveTitle, fisica);
+await until(
+  ana,
+  async () => (await movedLive.count()) === 1 && (await anaLive.count()) === 0,
+  'la nota del directo no pasó de «Directos / Física I …» a «Física»',
+);
+const liveTag = ((await movedLive.locator('.tree-tag').textContent()) ?? '').trim();
+if (liveTag !== `de ${communityName}`) throw new Error(`la nota movida no muestra «de ${communityName}»: ${liveTag}`);
+step(`Ana pasó la nota del directo a «Física», con la etiqueta «de ${communityName}»`);
+
+// Desliga: la nota queda solo suya y la comunidad se queda con una copia congelada en «Directos / [comunidad]».
+// Si el último guardado aún está en la cola, la vista reintenta («todavía se está guardando»)
+await movedLive.getByRole('button', { name: `Acciones de ${liveTitle}`, exact: true }).click();
+await ana.getByRole('menu', { name: `Acciones de ${liveTitle}`, exact: true }).getByRole('menuitem', { name: 'Desligar de la comunidad', exact: true }).click();
+const unlinkDialog = ana.getByRole('dialog', { name: 'Desligar de la comunidad', exact: true });
+await unlinkDialog.getByRole('button', { name: 'Desligar', exact: true }).click();
+const frozenLive = treeItem(ana, liveTitle, anaCommunity);
+await until(
+  ana,
+  async () => {
+    const failed = unlinkDialog.getByRole('alert');
+    if (await failed.count()) throw new Error(`desligar falló: ${await failed.textContent()}`);
+    if (await unlinkDialog.count()) return false;
+    if ((await movedLive.count()) !== 1 || (await movedLive.locator('.tree-tag').count()) !== 0) return false;
+    if ((await frozenLive.count()) !== 1) return false;
+    return ((await frozenLive.locator('.tree-row').textContent()) ?? '').includes('Copia congelada');
+  },
+  'tras desligar, la etiqueta «de …» no desapareció o no apareció la copia congelada en «Directos / Física I …»',
+  20000,
+);
+await ana.screenshot({ path: `${shots}/07-desligada.png` });
+step('desligada: la nota de «Física» ya no lleva «de …» y en «Directos / Física I …» está la copia congelada');
+
+// En «Apuntes compartidos», Beto ve ahora la copia congelada (con candado) y ya no la original
+const frozenId = await frozenLive.locator('.tree-row').getAttribute('data-id');
+await beto.goto(`${WEB}${communityUrl}`);
+await beto.getByRole('tab', { name: 'Apuntes compartidos' }).click();
+await until(
+  beto,
+  async () => (await anaLiveRow.count()) === 1 && (await anaLiveRow.getAttribute('href')) === `/notes/${frozenId}`,
+  'en «Apuntes compartidos» no está la copia congelada en lugar de la original',
+);
+if (!((await anaLiveRow.textContent()) ?? '').includes('Copia congelada')) throw new Error('la copia en «Apuntes compartidos» no muestra el candado');
+step('Beto ve en «Apuntes compartidos» la copia congelada, con candado, y ya no la original');
 
 console.log(`\nE2E completo. Sala: ${liveUrl}`);
 await browser.close();
