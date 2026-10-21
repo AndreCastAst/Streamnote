@@ -1,4 +1,6 @@
 // Cliente de la API y del canal en tiempo real.
+import type { FileItem, FolderRow } from './files';
+
 export const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:4000';
 
 export interface User {
@@ -22,6 +24,32 @@ export interface NoteModule {
   sourceModuleId?: string | null;
   sourceAuthor?: string | null;
   layout?: ModuleLayout;
+}
+
+// ---------- Archivos (carpetas y notas del panel «Mis archivos») ----------
+export type { FileItem, FolderRow } from './files';
+
+/** Respuesta de `GET /files`. */
+export interface FilesResponse {
+  folders: FolderRow[];
+  items: FileItem[];
+}
+
+/** Respuesta de `GET /notes/:id`. */
+export interface NoteDetail {
+  id: string;
+  title: string;
+  version: number;
+  streamId: string | null;
+  updatedAt: string;
+  author: string; // nombre de quien la escribió
+  canEdit: boolean;
+  isOwner: boolean;
+  locked: boolean;
+  folderId: string | null;
+  community: { id: string; name: string } | null;
+  sharedWith: { id: string; name: string }[];
+  modules: NoteModule[];
 }
 
 export class ApiError extends Error {

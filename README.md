@@ -69,7 +69,7 @@ Decisiones que vienen del documento de arquitectura:
 Sin Docker, sin la app corriendo y sin `npm install`:
 
 ```bash
-cd web && npm test                                                           # reglas del acomodo de la cuadrícula
+cd web && npm test                                                           # acomodo de la cuadrícula, árbol de archivos y pestañas
 ```
 
 Con la app corriendo:

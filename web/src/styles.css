@@ -423,6 +423,104 @@ table.members { width: 100%; border-collapse: collapse; }
   z-index: 20;
 }
 
+/* ---------- Panel «Mis archivos» ---------- */
+.file-tree { display: flex; flex-direction: column; min-height: 0; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); }
+.file-tree-bar { display: grid; gap: 8px; padding: 12px 12px 10px; border-bottom: 1px solid var(--rule); }
+.file-tree-bar h2 { margin: 0; font-size: 1rem; }
+.file-tree-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.file-tree-actions button { font-size: 0.8125rem; padding: 4px 10px; }
+.tree-empty { margin: 12px 12px 0; }
+.tree-body { flex: 1; min-height: 120px; overflow-y: auto; padding: 6px 0 24px; }
+.tree-body.drop-root { background: color-mix(in srgb, var(--highlight) 22%, white); box-shadow: inset 0 0 0 2px #d9be2a; }
+.tree, .tree [role='group'] { list-style: none; margin: 0; padding: 0; }
+.tree-item:focus { outline: none; }
+.tree-item:focus-visible > .tree-row { outline: 2px solid var(--focus); outline-offset: -2px; }
+.tree-row, .tree-new {
+  --depth: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 2px 6px 2px calc(8px + var(--depth) * 16px);
+  font-size: 0.9375rem;
+  cursor: pointer;
+  user-select: none;
+}
+.tree-row:hover { background: color-mix(in srgb, var(--grid) 35%, white); }
+.tree-row.selected { background: color-mix(in srgb, var(--grid) 55%, white); }
+.tree-row.active { background: color-mix(in srgb, var(--grid) 70%, white); font-weight: 700; box-shadow: inset 3px 0 0 var(--ink); }
+.tree-row.drop-target { background: color-mix(in srgb, var(--highlight) 45%, white); box-shadow: inset 0 0 0 2px #d9be2a; }
+.tree-twisty { flex: none; width: 12px; text-align: center; color: var(--ink-soft); font-size: 0.75rem; }
+.tree-icon { flex: none; width: 16px; height: 16px; color: var(--ink-soft); }
+.tree-icon.system { color: var(--margin); }
+.tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Título de la nota y, debajo, la etiqueta «de [comunidad]» */
+.tree-text { flex: 1; min-width: 0; display: grid; line-height: 1.3; }
+.tree-tag {
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0 4px;
+  background: linear-gradient(transparent 35%, var(--highlight) 35%, var(--highlight) 90%, transparent 90%);
+}
+.tree-lock { flex: none; display: inline-flex; }
+.tree-lock .tree-icon { width: 13px; height: 13px; color: var(--ink); }
+/* «⋯»: visible al pasar el cursor o con foco en la fila; siempre en pantallas táctiles */
+.tree-more { flex: none; padding: 0 6px; line-height: 1.4; border-color: transparent; background: transparent; color: var(--ink-soft); opacity: 0; }
+.tree-row:hover .tree-more, .tree-item:focus > .tree-row .tree-more, .tree-more:focus-visible, .tree-more[aria-expanded='true'] { opacity: 1; }
+.tree-more:hover:not(:disabled) { border-color: var(--rule); color: var(--ink); }
+@media (hover: none) { .tree-more { opacity: 1; } }
+.tree-edit { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.tree-edit input { padding: 2px 6px; font-size: 0.9375rem; }
+.tree-new { cursor: default; align-items: flex-start; padding-left: calc(8px + 18px + var(--depth) * 16px); }
+.tree-new > .tree-icon { margin-top: 6px; }
+.tree-error { color: var(--margin); font-size: 0.8125rem; line-height: 1.3; }
+.tree-row-error { --depth: 0; margin: 0; padding: 0 8px 4px calc(26px + var(--depth) * 16px); }
+.tree-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 200px;
+  padding: 4px 0;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(27, 42, 65, 0.15);
+}
+.tree-menu [role='menuitem'] { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; padding: 7px 14px; background: none; }
+.tree-menu [role='menuitem']:hover:not([aria-disabled='true']), .tree-menu [role='menuitem']:focus { background: color-mix(in srgb, var(--grid) 45%, white); outline: none; }
+.tree-menu [role='menuitem'][aria-disabled='true'] { color: var(--ink-soft); opacity: 0.7; cursor: default; }
+.tree-menu-reason { display: block; padding: 0 14px 6px; margin-top: -4px; font-size: 0.75rem; color: var(--ink-soft); }
+
+/* ---------- Diálogo ---------- */
+.dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--margin);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgba(27, 42, 65, 0.25);
+}
+.dialog::backdrop { background: rgba(27, 42, 65, 0.35); }
+.dialog-body { display: grid; gap: 12px; padding: 20px 22px; }
+.dialog-body h2 { margin: 0; }
+.dialog-content p:last-child { margin-bottom: 0; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+button.primary.danger { background: var(--margin); border-color: var(--margin); color: white; }
+button.primary.danger:hover:not(:disabled) { background: #b92f33; }
+.move-list { max-height: 50vh; overflow-y: auto; gap: 2px; border: 1px solid var(--rule); border-radius: var(--radius); padding: 6px 0; }
+.move-option { --depth: 0; padding: 4px 10px 4px calc(10px + var(--depth) * 16px); cursor: pointer; }
+.move-option:hover { background: color-mix(in srgb, var(--grid) 35%, white); }
+.move-option:has(input:disabled) { cursor: default; color: var(--ink-soft); }
+.move-option .tree-icon { margin-left: -2px; }
+
 /* ---------- Pantallas angostas ---------- */
 @media (max-width: 1200px) {
   .live-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
