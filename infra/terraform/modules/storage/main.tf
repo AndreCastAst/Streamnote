@@ -12,6 +12,12 @@ variable "provisional_days" {
   default = 3
 }
 
+variable "bucket_suffix" {
+  description = "Sufijo opcional para que el nombre sea único en el mundo (en AWS: el número de cuenta)"
+  type        = string
+  default     = ""
+}
+
 variable "force_destroy" {
   description = "true solo en local: permite borrar el bucket con objetos dentro"
   type        = bool
@@ -19,7 +25,7 @@ variable "force_destroy" {
 }
 
 resource "aws_s3_bucket" "recordings" {
-  bucket        = "${var.prefix}-recordings"
+  bucket        = var.bucket_suffix == "" ? "${var.prefix}-recordings" : "${var.prefix}-recordings-${var.bucket_suffix}"
   force_destroy = var.force_destroy
 }
 

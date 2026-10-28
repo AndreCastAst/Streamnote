@@ -1,0 +1,56 @@
+# Revisa sin cambiar nada: corre en cada Pull Request a main y muestra qué haría terraform apply.
+name: plan
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # sin esto GitHub no entrega el token OIDC
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+      TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # Terraform empaqueta las Lambdas desde backend/dist/lambda: hay que compilarlas antes del plan
+      - name: Compilar las Lambdas
+        working-directory: backend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:lambda
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.10"
+
+      - name: Formato
+        working-directory: infra/terraform
+        run: terraform fmt -check -recursive -diff || echo "::warning::Hay archivos sin formato. Corre 'terraform fmt -recursive' en infra/terraform"
+
+      - name: Plan
+        working-directory: infra/terraform/envs/dev
+        run: |
+          terraform init -input=false
+          terraform validate
+          terraform plan -input=false -no-color

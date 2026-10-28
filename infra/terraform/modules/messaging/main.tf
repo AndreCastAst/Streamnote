@@ -12,8 +12,8 @@ variable "queues" {
     max_receive_count  = number
   }))
   default = {
-    note-writes   = { visibility_timeout = 90, max_receive_count = 3 }  # RNF-05, RNF-10
-    domain-events = { visibility_timeout = 30, max_receive_count = 3 }  # RNF-11
+    note-writes   = { visibility_timeout = 90, max_receive_count = 3 }   # RNF-05, RNF-10
+    domain-events = { visibility_timeout = 30, max_receive_count = 3 }   # RNF-11
     media-jobs    = { visibility_timeout = 300, max_receive_count = 10 } # unir y subir grabaciones
   }
 }

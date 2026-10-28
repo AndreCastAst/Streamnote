@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { BrowserRouter, Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import { handleUnauthorized, loadSession, realtime, saveSession, setToken, type User } from './api';
 import { Login } from './pages/Login';
+import { logoutUrl } from './cognito';
 import { Home } from './pages/Home';
 import { CommunityPage } from './pages/Community';
 import { NotesWorkspace } from './pages/Notes';
@@ -87,7 +88,11 @@ function Shell({ children }: { children: ReactNode }) {
           <span className={`dot ${online ? 'on' : 'off'}`} title={online ? 'Conectado en tiempo real' : 'Reconectando…'} />
           <Notifications />
           <span className="who">{user?.name}</span>
-          <button type="button" className="link" onClick={signOut}>
+          <button type="button" className="link" onClick={() => {
+            signOut();
+            const url = logoutUrl();
+            if (url) window.location.assign(url);
+          }}>
             Salir
           </button>
         </div>

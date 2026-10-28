@@ -113,7 +113,7 @@ export class DataApiDb implements Db {
 
   async query<T>(sql: string, params: Params = {}): Promise<T[]> {
     const parameters: SqlParameter[] = Object.entries(params).map(([name, value]) => toSqlParameter(name, value));
-    const res = await this.client.send(
+    const res = await this.send(
       new ExecuteStatementCommand({
         ...this.opts,
         sql,
@@ -129,16 +129,31 @@ export class DataApiDb implements Db {
     return (await this.query<T>(sql, params))[0];
   }
 
+  /**
+   * Con capacidad mínima 0, Aurora se pausa sin uso y la primera llamada responde
+   * DatabaseResumingException mientras despierta (unos 15 s). Se reintenta antes de fallar.
+   */
+  private async send(command: any): Promise<any> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.client.send(command);
+      } catch (e) {
+        if ((e as Error)?.name !== 'DatabaseResumingException' || attempt >= 8) throw e;
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+  }
+
   async tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
     if (this.transactionId) return fn(this);
-    const { transactionId } = await this.client.send(new BeginTransactionCommand(this.opts));
+    const { transactionId } = await this.send(new BeginTransactionCommand(this.opts));
     const inner = new DataApiDb(this.client, this.opts, transactionId);
     try {
       const result = await fn(inner);
-      await this.client.send(new CommitTransactionCommand({ resourceArn: this.opts.resourceArn, secretArn: this.opts.secretArn, transactionId }));
+      await this.send(new CommitTransactionCommand({ resourceArn: this.opts.resourceArn, secretArn: this.opts.secretArn, transactionId }));
       return result;
     } catch (e) {
-      await this.client.send(new RollbackTransactionCommand({ resourceArn: this.opts.resourceArn, secretArn: this.opts.secretArn, transactionId }));
+      await this.send(new RollbackTransactionCommand({ resourceArn: this.opts.resourceArn, secretArn: this.opts.secretArn, transactionId }));
       throw e;
     }
   }

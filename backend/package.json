@@ -12,7 +12,7 @@
     "bootstrap:local": "tsx src/entrypoints/bootstrap-local.ts",
     "smoke": "tsx scripts/smoke.ts",
     "typecheck": "tsc --noEmit",
-    "build:lambda": "esbuild src/entrypoints/lambda.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/lambda/index.mjs --external:@aws-sdk/* --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\""
+    "build:lambda": "esbuild src/entrypoints/lambda.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/lambda/index.mjs --external:@aws-sdk/* --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" && node -e \"require('fs').cpSync('migrations', 'dist/lambda/migrations', { recursive: true })\""
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1152.0",

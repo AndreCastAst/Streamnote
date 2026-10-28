@@ -1,5 +1,6 @@
 # Aurora PostgreSQL Serverless v2 con RDS Data API: las Lambda consultan por HTTPS con IAM,
 # sin VPC, sin NAT Gateway y sin RDS Proxy. Escritor y lector en zonas distintas (RNF-04).
+# Con capacidad mínima 0 se pausa sola: nada cobra por estar encendido.
 
 variable "prefix" {
   type = string
@@ -15,8 +16,33 @@ variable "vpc_id" {
 }
 
 variable "min_acu" {
-  type    = number
-  default = 0.5
+  description = "0 = se pausa sola cuando no hay uso (sin costo de cómputo)"
+  type        = number
+  default     = 0
+}
+
+variable "seconds_until_auto_pause" {
+  description = "Tiempo sin conexiones antes de pausarse; 1 hora para no dormirse en horario de clases"
+  type        = number
+  default     = 3600
+}
+
+variable "deletion_protection" {
+  description = "true en producción; false en dev para poder destruir el entorno"
+  type        = bool
+  default     = true
+}
+
+variable "skip_final_snapshot" {
+  type    = bool
+  default = false
+}
+
+# Aurora PostgreSQL 16: la primera de la lista que AWS todavía ofrezca.
+# La capacidad mínima 0 pide 16.3 o superior.
+data "aws_rds_engine_version" "postgres" {
+  engine             = "aurora-postgresql"
+  preferred_versions = ["16.11", "16.10", "16.9", "16.8", "16.6"]
 }
 
 variable "max_acu" {
@@ -39,7 +65,7 @@ resource "aws_rds_cluster" "this" {
   cluster_identifier          = "${var.prefix}-db"
   engine                      = "aurora-postgresql"
   engine_mode                 = "provisioned"
-  engine_version              = "16.6"
+  engine_version              = data.aws_rds_engine_version.postgres.version_actual
   database_name               = "streamnote"
   master_username             = "streamnote"
   manage_master_user_password = true # el secreto queda en Secrets Manager
@@ -48,13 +74,19 @@ resource "aws_rds_cluster" "this" {
   vpc_security_group_ids      = [aws_security_group.db.id]
   storage_encrypted           = true
   backup_retention_period     = 35 # respaldo continuo sin costo extra dentro de este plazo
-  deletion_protection         = true
+  deletion_protection         = var.deletion_protection
   copy_tags_to_snapshot       = true
-  final_snapshot_identifier   = "${var.prefix}-db-final"
+  skip_final_snapshot         = var.skip_final_snapshot
+  final_snapshot_identifier   = var.skip_final_snapshot ? null : "${var.prefix}-db-final"
 
   serverlessv2_scaling_configuration {
-    min_capacity = var.min_acu
-    max_capacity = var.max_acu
+    min_capacity             = var.min_acu
+    max_capacity             = var.max_acu
+    seconds_until_auto_pause = var.min_acu == 0 ? var.seconds_until_auto_pause : null
+  }
+
+  lifecycle {
+    ignore_changes = [engine_version] # AWS aplica las versiones menores; no forzar cambios en cada plan
   }
 }
 
@@ -66,10 +98,18 @@ resource "aws_rds_cluster_instance" "this" {
   engine             = aws_rds_cluster.this.engine
   engine_version     = aws_rds_cluster.this.engine_version
   promotion_tier     = each.value
+
+  lifecycle {
+    ignore_changes = [engine_version]
+  }
 }
 
 output "cluster_arn" {
   value = aws_rds_cluster.this.arn
+}
+
+output "cluster_id" {
+  value = aws_rds_cluster.this.cluster_identifier
 }
 
 output "secret_arn" {

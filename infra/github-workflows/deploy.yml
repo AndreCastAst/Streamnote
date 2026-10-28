@@ -1,0 +1,98 @@
+# Despliega al hacer merge (o push) a main: infraestructura, migraciones y frontend.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-dev # nunca dos despliegues al mismo tiempo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 60
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+      TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-duration-seconds: 3600
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            web/package-lock.json
+
+      # 1) Código de las Lambdas (Terraform lo comprime con archive_file y lo sube)
+      - name: Compilar las Lambdas
+        working-directory: backend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:lambda
+
+      # 2) Infraestructura
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.10"
+          terraform_wrapper: false # sin esto "terraform output" devuelve texto extra
+
+      - name: Terraform apply
+        working-directory: infra/terraform/envs/dev
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve
+          {
+            echo "WEB_URL=$(terraform output -raw web_url)"
+            echo "WEB_BUCKET=$(terraform output -raw web_bucket)"
+            echo "CF_ID=$(terraform output -raw cloudfront_id)"
+            echo "API_URL=$(terraform output -raw api_url)"
+            echo "COGNITO_DOMAIN=$(terraform output -raw cognito_domain)"
+            echo "COGNITO_CLIENT_ID=$(terraform output -raw cognito_client_id)"
+            echo "MIGRATE_FN=$(terraform output -raw migrate_function)"
+          } >> "$GITHUB_ENV"
+
+      # 3) Esquema de la base: la Lambda migrate aplica los .sql pendientes por Data API
+      - name: Migraciones
+        run: |
+          error=$(aws lambda invoke --function-name "$MIGRATE_FN" --cli-read-timeout 330 \
+            --query FunctionError --output text migrate.json)
+          cat migrate.json; echo
+          if [ "$error" != "None" ]; then echo "::error::La migración falló"; exit 1; fi
+
+      # 4) Frontend: compilar con la URL real de la API y de Cognito, subir y limpiar la caché
+      - name: Publicar el frontend
+        working-directory: web
+        env:
+          VITE_REALTIME: "off"
+        run: |
+          npm ci --no-audit --no-fund
+          VITE_API_URL="$API_URL" VITE_COGNITO_DOMAIN="$COGNITO_DOMAIN" VITE_COGNITO_CLIENT_ID="$COGNITO_CLIENT_ID" npm run build
+          aws s3 sync dist "s3://$WEB_BUCKET" --delete
+          aws cloudfront create-invalidation --distribution-id "$CF_ID" --paths "/*" > /dev/null
+
+      - name: Resumen
+        run: |
+          {
+            echo "## StreamNote desplegado"
+            echo ""
+            echo "- Web: $WEB_URL"
+            echo "- API: $API_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

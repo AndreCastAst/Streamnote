@@ -89,7 +89,7 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
   try {
     res = await fetch(`${API_URL}${path}`, {
       method,
-      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: token } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
@@ -135,6 +135,8 @@ class Realtime {
 
   private open() {
     if (!token || !this.wanted || this.ws) return;
+    // En AWS el tiempo real irá por IVS Chat / WebSocket API (fase 2); mientras tanto no se abre
+    if (import.meta.env.VITE_REALTIME === 'off') return;
     const ws = new WebSocket(`${API_URL.replace(/^http/, 'ws')}/ws?token=${encodeURIComponent(token)}`);
     this.ws = ws;
     ws.onopen = () => {

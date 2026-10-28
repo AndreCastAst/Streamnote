@@ -65,5 +65,7 @@ export class Auth {
 export function bearer(header: string | undefined): string | null {
   if (!header) return null;
   const [scheme, token] = header.split(' ');
+  // Sin prefijo: así lo manda la web a la REST API (el autorizador de Cognito recibe el token tal cual)
+  if (token === undefined) return scheme || null;
   return scheme?.toLowerCase() === 'bearer' && token ? token : null;
 }

@@ -29,7 +29,7 @@ Para probar los dos roles a la vez, entra con un correo en una ventana normal y 
 | En AWS | En local | Qué cambia en el código |
 | --- | --- | --- |
 | Aurora PostgreSQL Serverless v2 + RDS Data API | PostgreSQL 16 | `DB_DRIVER=pg` o `data-api` ([db.ts](backend/src/core/db.ts)) |
-| API Gateway HTTP + Lambda | Fastify | Nada: las mismas rutas ([router.ts](backend/src/app/router.ts)) |
+| API Gateway REST + Lambda | Fastify | Nada: las mismas rutas ([router.ts](backend/src/app/router.ts)) |
 | Consumidores SQS en Lambda | Proceso `worker` | Nada: las mismas funciones ([lambda.ts](backend/src/entrypoints/lambda.ts)) |
 | SQS, EventBridge, S3, DynamoDB | moto (emulador de AWS) | Solo `AWS_ENDPOINT_URL` |
 | EventBridge Scheduler | El worker revisa la tabla cada 10 s | `SCHEDULER_MODE=poll` o `eventbridge` |
@@ -104,16 +104,14 @@ npm --prefix web run dev
 
 ## Desplegar en AWS
 
-`infra/terraform/envs/aws` ya declara colas, bus, bucket, tabla, Aurora con Data API, las cuatro Lambda, API Gateway, Cognito y el rol de Scheduler. **Todavía no se ha aplicado**: revisa el `terraform plan` con calma antes de crear nada.
+Lo despliega **GitHub Actions** con Terraform, sin llaves de AWS guardadas (OIDC). La guía paso a paso está en [infra/DESPLIEGUE_AWS.md](infra/DESPLIEGUE_AWS.md).
 
-1. `cd backend && npm run build:lambda`
-2. Crea `prod.tfvars` con `vpc_id`, `private_subnet_ids` (dos zonas) y `web_origins`.
-3. `terraform init && terraform plan -var-file=prod.tfvars`
-4. Migraciones: la Data API no ejecuta archivos con varias sentencias. Córrelas una vez con `npm run migrate` desde una máquina con acceso al clúster (por ejemplo, un túnel de Session Manager).
+- `infra/terraform/bootstrap`: se aplica una sola vez a mano (bucket del estado, proveedor OIDC y rol del pipeline).
+- `infra/terraform/envs/dev`: lo aplica `.github/workflows/deploy.yml` al hacer merge a `main`; `plan.yml` muestra el plan en cada Pull Request.
+- El pipeline compila las Lambda, aplica Terraform, corre las migraciones con la Lambda `migrate` (Data API) y publica la web en S3 + CloudFront.
 
 Lo que falta para producción:
 
 - Adaptador de **Amazon IVS** que implemente la interfaz `MediaServer` ([media.ts](backend/src/core/media.ts)). Mientras no exista, las rutas de video responden 501 y el resto de la app funciona.
 - **IVS Chat** para el chat y los módulos compartidos (eventos `SendEvent`), y **Web Push** para los avisos. Hoy en AWS los avisos quedan en DynamoDB sin empujarse.
 - Una capa de Lambda con **ffmpeg** para `media-jobs`.
-- La web en **S3 + CloudFront** (`npm --prefix web run build`).
