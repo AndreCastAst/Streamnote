@@ -93,7 +93,7 @@ interface NoteRow {
   stream_id: string | null;
   updated_at: string;
   folder_id: string | null;
-  community_id: string | null; // vinculada: los miembros de la comunidad la leen
+  community_id: string | null; // vinculada: quienes ven la comunidad la leen
   locked: boolean; // copia congelada: nadie la edita
 }
 
@@ -134,14 +134,15 @@ async function loadModules(db: Db, noteId: string) {
 
 /**
  * El dueño puede editar (salvo una copia congelada, que solo lee); pueden leer quienes ven una
- * comunidad con la que se compartió y los miembros (solo miembros, también en las públicas) de la
- * comunidad a la que está vinculada.
+ * comunidad con la que se compartió o la comunidad a la que está vinculada (en las públicas,
+ * también los no miembros: ven, pero no participan). Las copias congeladas también tienen
+ * comunidad y siguen en solo lectura para todos.
  */
 async function readAccess(db: Db, note: NoteRow, userId: string): Promise<'edit' | 'read' | null> {
   if (note.owner_id === userId) return note.locked ? 'read' : 'edit';
   const shares = await db.query<{ community_id: string }>('SELECT community_id FROM note_shares WHERE note_id = :n::uuid', { n: note.id });
   for (const s of shares) if (await canView(db, s.community_id, userId)) return 'read';
-  if (note.community_id && (await getMembership(db, note.community_id, userId))) return 'read';
+  if (note.community_id && (await canView(db, note.community_id, userId))) return 'read';
   return null;
 }
 
@@ -209,12 +210,12 @@ export const noteRoutes = [
     path: '/notes',
     auth: 'user',
     body: CreateNote,
-    async handler(req, { db }) {
+    async handler(req, { db, realtime }) {
       const user = requireUser(req);
       const b = req.body as z.infer<typeof CreateNote>;
-      // Nota de un directo: va a «Directos / [comunidad]» y, si el autor es miembro, queda vinculada
+      // Nota de un directo: va a «Directos / [comunidad]» y queda vinculada a la comunidad.
+      // Solo los miembros toman notas: un no miembro de una pública ve el directo, pero no participa.
       let stream: { community_id: string; name: string } | undefined;
-      let communityId: string | null = null;
       if (b.streamId) {
         stream = await db.one<{ community_id: string; name: string }>(
           'SELECT s.community_id, c.name FROM stream_sessions s JOIN communities c ON c.id = s.community_id WHERE s.id = :id::uuid',
@@ -222,10 +223,11 @@ export const noteRoutes = [
         );
         if (!stream) throw notFound('El directo no existe');
         if (!(await canView(db, stream.community_id, user.id))) throw forbidden('No tienes acceso a este directo');
-        if (await getMembership(db, stream.community_id, user.id)) communityId = stream.community_id;
+        if (!(await getMembership(db, stream.community_id, user.id))) throw forbidden('Únete a la comunidad para tomar notas en este directo');
       } else if (b.folderId) {
         await ownFolder(db, user.id, b.folderId);
       }
+      const communityId = stream?.community_id ?? null;
       const note = await db.tx(async (tx) => {
         const folderId = stream ? await directosFolder(tx, user.id, stream.community_id, stream.name) : (b.folderId ?? null);
         const n = await tx.one<{ id: string }>(
@@ -237,6 +239,8 @@ export const noteRoutes = [
         await insertModules(tx, n!.id, b.modules?.length ? b.modules : [emptyText()]);
         return n;
       });
+      // Una pestaña nueva aparece en el cuadro de los demás sin esperar a su primer guardado
+      if (b.streamId) await notifyNoteUpdated({ db, realtime }, note!.id);
       return { status: 201, body: note };
     },
   }),
@@ -383,6 +387,16 @@ export const noteRoutes = [
       const user = requireUser(req);
       const note = await loadNote(db, idParam(req));
       if (!(await readAccess(db, note, user.id))) throw forbidden();
+      // Leer basta con ver la comunidad; copiar es participar: hay que ser miembro de la comunidad
+      // por la que llega (la vinculada o alguna con la que se compartió)
+      if (note.owner_id !== user.id) {
+        const member = await db.one(
+          `SELECT 1 FROM memberships m WHERE m.user_id = :u::uuid
+             AND (m.community_id = :c::uuid OR m.community_id IN (SELECT s.community_id FROM note_shares s WHERE s.note_id = :n::uuid))`,
+          { u: user.id, c: note.community_id, n: note.id },
+        );
+        if (!member) throw forbidden('Únete a la comunidad para copiar esta nota');
+      }
       const author = await db.one<{ display_name: string }>('SELECT display_name FROM users WHERE id = :u::uuid', { u: note.owner_id });
       const modules = (await loadModules(db, note.id)).map((m) => ({
         ...m,
@@ -442,6 +456,30 @@ export const noteRoutes = [
     },
   }),
 ];
+
+/**
+ * Avisa en el canal del directo que una nota del directo se creó o cambió, para que los demás
+ * recarguen ese espacio. Solo las vinculadas y no congeladas: el canal lo escucha cualquiera que
+ * vea la comunidad, y de una privada se filtrarían su título y su existencia.
+ * Nunca lanza: se llama después de aplicar el guardado, y un error ahí dejaría el mensaje en la
+ * cola, cuyo reintento ya sería 'duplicate' (el aviso es un extra, no parte del guardado).
+ */
+export async function notifyNoteUpdated({ db, realtime }: Pick<Deps, 'db' | 'realtime'>, noteId: string): Promise<void> {
+  try {
+    const n = await db.one<{ stream_id: string | null; community_id: string | null; locked: boolean; owner_id: string; version: string; title: string }>(
+      'SELECT stream_id, community_id, locked, owner_id, version, title FROM notes WHERE id = :id::uuid AND deleted_at IS NULL',
+      { id: noteId },
+    );
+    if (!n?.stream_id || !n.community_id || n.locked) return;
+    await realtime.publish({
+      channel: `stream:${n.stream_id}`,
+      type: 'note.updated',
+      data: { noteId, ownerId: n.owner_id, version: Number(n.version), title: n.title },
+    });
+  } catch {
+    // Se ignora: perder un aviso solo retrasa la actualización de un cuadro del tablero
+  }
+}
 
 /**
  * Consumidor de la cola de escrituras.

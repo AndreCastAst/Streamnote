@@ -225,7 +225,38 @@ ok((await auth('read', readToken, 's_00000000000000000000000000000000')).status 
 ok((await auth('read', null)).status === 401, 'sin token no se puede ver');
 
 ws.send(JSON.stringify({ type: 'subscribe', channel: `stream:${stream.id}` }));
-await until(async () => inbox, (m) => m.some((x) => x.type === 'subscribed'));
+const inStream = (x: any) => x.channel === `stream:${stream.id}`;
+await until(async () => inbox, (m) => m.some((x) => x.type === 'subscribed' && inStream(x)));
+const ack = inbox.find((x) => x.type === 'subscribed' && inStream(x));
+ok(ack?.data?.online?.some((u: any) => u.id === beto.user.id && u.name === 'Beto Alumno'), 'el acuse de la suscripción trae a Beto entre los conectados');
+// Tablero del directo: cada pestaña es una nota vinculada; crearla o guardarla avisa note.updated en el canal
+const liveNote2 = (await call(beto.token, 'POST', '/notes', { title: 'Apuntes del directo (2)', streamId: stream.id })).body;
+await until(async () => inbox, (m) => m.some((x) => x.type === 'note.updated' && x.data?.noteId === liveNote2.id));
+ok(inbox.some((x) => x.type === 'note.updated' && inStream(x) && x.data.noteId === liveNote2.id && x.data.ownerId === beto.user.id), 'crear otra nota del directo avisa note.updated');
+const boardBeto = (await call(beto.token, 'GET', `/streams/${stream.id}/board`)).body;
+ok(
+  boardBeto.isMember === true && boardBeto.participants?.[0]?.user.id === beto.user.id && boardBeto.participants[0].isHost === true &&
+    boardBeto.participants[0].notes.map((n: any) => n.id).join(',') === [liveNote.id, liveNote2.id].join(','),
+  'el tablero trae al anfitrión primero con sus dos notas en orden de creación',
+);
+const anaLive = (await call(ana.token, 'POST', '/notes', { title: 'Apuntes de Ana', streamId: stream.id })).body;
+const boardAna = (await call(ana.token, 'GET', `/streams/${stream.id}/board`)).body;
+ok(
+  boardAna.participants?.length === 2 && boardAna.participants[0].user.id === beto.user.id && boardAna.participants[1].user.id === ana.user.id &&
+    boardAna.participants[1].isHost === false && boardAna.participants[1].notes.map((n: any) => n.id).join(',') === anaLive.id,
+  'en el tablero de Ana aparecen Beto (primero) y Ana con su nota',
+);
+const anaLiveV = (await call(ana.token, 'GET', `/notes/${anaLive.id}`)).body.version + 1;
+await call(ana.token, 'PUT', `/notes/${anaLive.id}`, {
+  opId: randomUUID(),
+  version: anaLiveV,
+  title: 'Apuntes de Ana',
+  modules: [{ id: randomUUID(), type: 'text', content: { text: 'Suma de Riemann' } }],
+});
+const isAnaSave = (x: any) => x.type === 'note.updated' && inStream(x) && x.data?.noteId === anaLive.id && x.data.version === anaLiveV;
+await until(async () => inbox, (m) => m.some(isAnaSave));
+ok(inbox.some(isAnaSave), 'al aplicarse el guardado de Ana, Beto recibe note.updated con la versión nueva');
+ok((await call(beto.token, 'GET', `/streams/${randomUUID()}/board`)).status === 404, 'el tablero de un directo inexistente → 404');
 const mod = await call(ana.token, 'POST', `/streams/${stream.id}/modules`, { type: 'code', content: { code: 'print(42)', language: 'python' } });
 ok(mod.status === 201, 'Ana comparte un módulo en el directo');
 await until(async () => inbox, (m) => m.some((x) => x.type === 'module.shared'));
@@ -259,6 +290,32 @@ ok(
   afterUnlink.some((n: any) => n.id === frozenId && n.locked === true) && !afterUnlink.some((n: any) => n.id === liveNote.id),
   'la comunidad ve la copia congelada y ya no la original',
 );
+
+// ---- Directo: invitados (no miembros) ----
+// En una comunidad pública, quien no es miembro ve el directo y el tablero en solo lectura; para participar tiene que unirse
+const carla = await login(`carla-${run}@upao.edu.pe`, 'Carla Visita');
+const pubC = (await call(ana.token, 'POST', '/communities', { name: `Física abierta ${run}`, visibility: 'public' })).body;
+const pubStream = (await call(ana.token, 'POST', `/communities/${pubC.id}/streams`, { title: 'Clase abierta' })).body;
+ok(pubC.id && pubStream.id, 'Ana crea una comunidad pública e inicia un directo en ella');
+const anaPubNote = (await call(ana.token, 'POST', '/notes', { title: 'Clase abierta', streamId: pubStream.id })).body;
+const guestInfo = await call(carla.token, 'GET', `/streams/${pubStream.id}`);
+ok(guestInfo.status === 200 && guestInfo.body.isMember === false, 'Carla (no miembro) ve el directo de la pública como invitada');
+const guestBoard = (await call(carla.token, 'GET', `/streams/${pubStream.id}/board`)).body;
+ok(
+  guestBoard.isMember === false && guestBoard.participants?.some((p: any) => p.user.id === ana.user.id && p.notes.some((n: any) => n.id === anaPubNote.id)),
+  'el tablero de la invitada trae la nota de Ana',
+);
+const guestRead = await call(carla.token, 'GET', `/notes/${anaPubNote.id}`);
+ok(guestRead.status === 200 && guestRead.body.canEdit === false, 'Carla lee la nota vinculada de Ana sin poder editarla');
+ok((await call(carla.token, 'GET', `/communities/${pubC.id}/notes`)).body.some((n: any) => n.id === anaPubNote.id), 'la nota vinculada aparece en los apuntes de la pública');
+ok((await call(carla.token, 'POST', '/notes', { title: 'Mis apuntes', streamId: pubStream.id })).status === 403, 'sin unirse, Carla no puede tomar notas en el directo');
+ok((await call(carla.token, 'POST', `/streams/${pubStream.id}/chat`, { text: 'Hola' })).status === 403, 'sin unirse, Carla no puede chatear');
+ok((await call(carla.token, 'POST', `/streams/${pubStream.id}/modules`, { type: 'text', content: { text: 'Hola' } })).status === 403, 'sin unirse, Carla no puede compartir módulos');
+ok((await call(carla.token, 'POST', `/notes/${anaPubNote.id}/copy`)).status === 403, 'sin unirse, Carla no puede copiar la nota de Ana');
+ok((await call(carla.token, 'POST', `/communities/${pubC.id}/join`)).status === 200, 'Carla se une a la comunidad pública');
+ok((await call(carla.token, 'POST', '/notes', { title: 'Mis apuntes', streamId: pubStream.id })).status === 201, 'ya como miembro, Carla toma notas en el directo');
+ok((await call(carla.token, 'POST', `/streams/${pubStream.id}/chat`, { text: 'Hola' })).status === 201, 'ya como miembro, Carla chatea');
+ok((await call(ana.token, 'POST', `/streams/${pubStream.id}/end`)).status === 200, 'Ana termina el directo de la pública');
 
 // ---- Recordatorios ----
 const rem = await call(beto.token, 'POST', '/reminders', { title: 'Repasar integrales', fireAt: new Date(Date.now() + 2000).toISOString() });

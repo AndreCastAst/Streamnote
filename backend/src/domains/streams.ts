@@ -33,6 +33,18 @@ async function loadSession(db: Deps['db'], id: string): Promise<Session> {
   return s;
 }
 
+/** Ver el directo basta con canView; participar (chat, compartir módulos) exige ser el anfitrión o miembro. */
+async function requireParticipant(db: Deps['db'], s: Session, userId: string) {
+  if (s.host_id === userId) return;
+  if (!(await getMembership(db, s.community_id, userId))) throw forbidden('Únete a la comunidad para participar');
+}
+
+interface BoardParticipant {
+  user: { id: string; name: string };
+  isHost: boolean;
+  notes: Array<{ id: string; title: string; updatedAt: string; version: number }>;
+}
+
 // ---------- Tokens de video (equivalen al token de reproducción firmado de IVS) ----------
 type MediaAction = 'publish' | 'read';
 
@@ -165,6 +177,40 @@ export const streamRoutes = [
     },
   }),
 
+  // Tablero: los participantes con sus notas del directo (cada nota es una pestaña de su espacio).
+  // Lo ve quien ve la comunidad; los conectados sin notas no salen aquí: los aporta la presencia.
+  route({
+    method: 'GET',
+    path: '/streams/:id/board',
+    auth: 'user',
+    async handler(req, { db }) {
+      const user = requireUser(req);
+      const s = await loadSession(db, idParam(req));
+      if (!(await canView(db, s.community_id, user.id))) throw forbidden('Esta comunidad es privada');
+      const rows = await db.query<{ id: string; title: string; updated_at: string; version: string; owner_id: string; display_name: string }>(
+        `SELECT n.id, n.title, n.updated_at, n.version, n.owner_id, u.display_name
+         FROM notes n JOIN users u ON u.id = n.owner_id
+         WHERE n.stream_id = :s::uuid AND n.community_id = :c::uuid AND n.deleted_at IS NULL AND NOT n.locked
+         ORDER BY n.created_at, n.id`,
+        { s: s.id, c: s.community_id },
+      );
+      const host = await db.one<{ display_name: string }>('SELECT display_name FROM users WHERE id = :u::uuid', { u: s.host_id });
+      // El anfitrión siempre y primero (aunque no tenga notas); luego cada dueño en el orden de su primera nota
+      const byUser = new Map<string, BoardParticipant>();
+      byUser.set(s.host_id, { user: { id: s.host_id, name: host?.display_name ?? '' }, isHost: true, notes: [] });
+      for (const r of rows) {
+        let p = byUser.get(r.owner_id);
+        if (!p) {
+          p = { user: { id: r.owner_id, name: r.display_name }, isHost: false, notes: [] };
+          byUser.set(r.owner_id, p);
+        }
+        p.notes.push({ id: r.id, title: r.title, updatedAt: r.updated_at, version: Number(r.version) });
+      }
+      const isMember = s.host_id === user.id || !!(await getMembership(db, s.community_id, user.id));
+      return { participants: [...byUser.values()], isMember };
+    },
+  }),
+
   route({
     method: 'POST',
     path: '/streams/:id/end',
@@ -189,7 +235,7 @@ export const streamRoutes = [
       const user = requireUser(req);
       const s = await loadSession(deps.db, idParam(req));
       if (s.status !== 'live') throw badRequest('El directo ya terminó');
-      if (!(await canView(deps.db, s.community_id, user.id))) throw forbidden();
+      await requireParticipant(deps.db, s, user.id);
       const b = req.body as z.infer<typeof ShareModule>;
       const row = await deps.db.one(
         `INSERT INTO stream_shared_modules (stream_id, shared_by, type, content, source_module_id)
@@ -232,7 +278,7 @@ export const streamRoutes = [
       const user = requireUser(req);
       const s = await loadSession(deps.db, idParam(req));
       if (s.status !== 'live') throw badRequest('El directo ya terminó');
-      if (!(await canView(deps.db, s.community_id, user.id))) throw forbidden();
+      await requireParticipant(deps.db, s, user.id);
       const msg = { id: randomUUID(), text: (req.body as { text: string }).text, from: { id: user.id, name: user.name }, at: new Date().toISOString() };
       await deps.realtime.publish({ channel: `stream:${s.id}`, type: 'chat.message', data: msg });
       return { status: 201, body: msg };

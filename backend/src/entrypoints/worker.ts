@@ -2,7 +2,7 @@
 // las reglas de EventBridge y EventBridge Scheduler.
 import type { Message } from '@aws-sdk/client-sqs';
 import { buildDeps, type Deps } from '../app/deps.js';
-import { applyNoteWrite, type NoteWriteMessage } from '../domains/notes.js';
+import { applyNoteWrite, notifyNoteUpdated, type NoteWriteMessage } from '../domains/notes.js';
 import { handleDomainEvent, fireDueReminders } from '../domains/notifications.js';
 import { reconcileStreams, processRecording, expireProvisionalRecordings, RetryLater } from '../domains/streams.js';
 
@@ -55,7 +55,8 @@ const { resources, scheduler, recordings } = deps.cfg;
 
 void consume('note-writes', resources.noteWritesQueueUrl, async (msg: NoteWriteMessage) => {
   const result = await applyNoteWrite(deps, msg);
-  if (result !== 'applied') log(`[note-writes] nota ${msg.noteId} v${msg.version}: ${result}`);
+  if (result === 'applied') await notifyNoteUpdated(deps, msg.noteId);
+  else log(`[note-writes] nota ${msg.noteId} v${msg.version}: ${result}`);
 }, deps);
 
 // La regla de EventBridge entrega el evento completo; lo útil va en detail-type y detail

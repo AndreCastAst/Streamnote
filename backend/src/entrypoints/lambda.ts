@@ -6,7 +6,7 @@
 //   mediaJobs     ← SQS media-jobs       (en AWS lo llena la regla "IVS Recording State Change")
 import { buildDeps } from '../app/deps.js';
 import { execute, matchRoute } from '../app/router.js';
-import { applyNoteWrite } from '../domains/notes.js';
+import { applyNoteWrite, notifyNoteUpdated } from '../domains/notes.js';
 import { handleDomainEvent } from '../domains/notifications.js';
 import { processRecording } from '../domains/streams.js';
 
@@ -57,6 +57,9 @@ async function eachRecord(event: SqsEvent, fn: (body: any) => Promise<unknown>) 
   return { batchItemFailures };
 }
 
-export const noteWrites = (event: SqsEvent) => eachRecord(event, (m) => applyNoteWrite(deps, m));
+export const noteWrites = (event: SqsEvent) =>
+  eachRecord(event, async (m) => {
+    if ((await applyNoteWrite(deps, m)) === 'applied') await notifyNoteUpdated(deps, m.noteId);
+  });
 export const domainEvents = (event: SqsEvent) => eachRecord(event, (e) => handleDomainEvent(deps, e['detail-type'], e.detail));
 export const mediaJobs = (event: SqsEvent) => eachRecord(event, (j) => processRecording(deps, j.streamId));

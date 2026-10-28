@@ -243,8 +243,9 @@ export const communityRoutes = [
     },
   }),
 
-  // Apuntes de la comunidad: los compartidos a mano y, solo para sus miembros, los vinculados
-  // (notas de sus directos y copias congeladas). Una sola consulta sobre notes, sin duplicados.
+  // Apuntes de la comunidad: los compartidos a mano y los vinculados (notas de sus directos y
+  // copias congeladas), para quien pueda verla (en las públicas, también los no miembros, en solo
+  // lectura). Una sola consulta sobre notes, sin duplicados.
   route({
     method: 'GET',
     path: '/communities/:id/notes',
@@ -253,7 +254,6 @@ export const communityRoutes = [
       const user = requireUser(req);
       const id = idParam(req);
       if (!(await canView(db, id, user.id))) throw forbidden();
-      const member = !!(await getMembership(db, id, user.id));
       return db.query(
         `SELECT n.id, n.title, n.updated_at, u.display_name AS author, n.locked,
                 coalesce((SELECT s.shared_at FROM note_shares s WHERE s.note_id = n.id AND s.community_id = :c::uuid), n.created_at) AS shared_at,
@@ -263,10 +263,10 @@ export const communityRoutes = [
          JOIN users u ON u.id = n.owner_id
          LEFT JOIN stream_sessions ss ON ss.id = n.stream_id
          WHERE n.deleted_at IS NULL
-           AND ((n.community_id = :c::uuid AND :member::boolean)
+           AND (n.community_id = :c::uuid
                 OR EXISTS (SELECT 1 FROM note_shares s WHERE s.note_id = n.id AND s.community_id = :c::uuid))
          ORDER BY shared_at DESC`,
-        { c: id, member },
+        { c: id },
       );
     },
   }),

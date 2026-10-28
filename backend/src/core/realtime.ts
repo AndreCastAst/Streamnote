@@ -15,21 +15,54 @@ export interface Realtime {
   publish(msg: RealtimeMessage): Promise<void>;
 }
 
+export interface OnlineUser {
+  id: string;
+  name: string;
+}
+
+const isStream = (channel: string) => channel.startsWith('stream:');
+
 /** Concentrador en memoria dentro del proceso de la API. */
 export class LocalHub implements Realtime {
   private subs = new Map<string, Set<WebSocket>>();
+  // Presencia: quién está detrás de cada socket suscrito a un canal de directo
+  private users = new Map<string, Map<WebSocket, OnlineUser>>();
 
-  subscribe(channel: string, ws: WebSocket) {
+  subscribe(channel: string, ws: WebSocket, user?: OnlineUser) {
     if (!this.subs.has(channel)) this.subs.set(channel, new Set());
     this.subs.get(channel)!.add(ws);
+    if (user && isStream(channel)) {
+      if (!this.users.has(channel)) this.users.set(channel, new Map());
+      // Volver a suscribirse no cambia el orden: Map conserva la posición de una clave existente
+      this.users.get(channel)!.set(ws, { id: user.id, name: user.name });
+    }
   }
 
-  unsubscribe(channel: string, ws: WebSocket) {
-    this.subs.get(channel)?.delete(ws);
+  /** Devuelve si el socket estaba en el canal (para avisar de la baja solo entonces). */
+  unsubscribe(channel: string, ws: WebSocket): boolean {
+    const set = this.subs.get(channel);
+    const had = !!set?.delete(ws);
+    if (set && !set.size) this.subs.delete(channel);
+    const users = this.users.get(channel);
+    users?.delete(ws);
+    if (users && !users.size) this.users.delete(channel);
+    return had;
   }
 
-  drop(ws: WebSocket) {
-    for (const set of this.subs.values()) set.delete(ws);
+  /** Quita el socket de todos los canales y devuelve los de directo en los que estaba. */
+  drop(ws: WebSocket): string[] {
+    const left: string[] = [];
+    for (const channel of [...this.subs.keys()]) {
+      if (this.unsubscribe(channel, ws) && isStream(channel)) left.push(channel);
+    }
+    return left;
+  }
+
+  /** Usuarios conectados a un canal de directo, sin repetir (dos pestañas cuentan una vez), en orden de llegada. */
+  online(channel: string): OnlineUser[] {
+    const seen = new Map<string, OnlineUser>();
+    for (const u of this.users.get(channel)?.values() ?? []) if (!seen.has(u.id)) seen.set(u.id, { ...u });
+    return [...seen.values()];
   }
 
   count(channel: string) {

@@ -45,6 +45,10 @@ app.post('/internal/realtime', async (req, reply) => {
   return { ok: true };
 });
 
+// Presencia: a cada alta o baja en un canal de directo, la lista de conectados va a todo el canal
+const presence = (channel: string) =>
+  hub.publish({ channel, type: 'presence', data: { online: hub.online(channel) } }).catch(() => undefined);
+
 // WebSocket: canal personal automático + suscripción a directos que el usuario puede ver
 app.get('/ws', { websocket: true }, async (socket, req) => {
   const user = await deps.auth.verify((req.query as Record<string, string>).token);
@@ -59,19 +63,27 @@ app.get('/ws', { websocket: true }, async (socket, req) => {
       if (msg.type === 'ping') return socket.send(JSON.stringify({ type: 'pong' }));
       const m = /^stream:([0-9a-f-]{36})$/.exec(msg.channel ?? '');
       if (!m) return;
-      if (msg.type === 'unsubscribe') return hub.unsubscribe(msg.channel!, socket);
+      if (msg.type === 'unsubscribe') {
+        if (hub.unsubscribe(msg.channel!, socket)) await presence(msg.channel!);
+        return;
+      }
       if (msg.type === 'subscribe') {
         const s = await deps.db.one<{ community_id: string }>('SELECT community_id FROM stream_sessions WHERE id = :id::uuid', { id: m[1] });
-        if (s && (await canView(deps.db, s.community_id, user.id))) {
-          hub.subscribe(msg.channel!, socket);
-          socket.send(JSON.stringify({ channel: msg.channel, type: 'subscribed', data: null }));
+        // Si el socket se cerró mientras se consultaba, no se suscribe: quedaría «conectado» para siempre
+        if (s && (await canView(deps.db, s.community_id, user.id)) && socket.readyState === socket.OPEN) {
+          hub.subscribe(msg.channel!, socket, { id: user.id, name: user.name });
+          socket.send(JSON.stringify({ channel: msg.channel, type: 'subscribed', data: { online: hub.online(msg.channel!) } }));
+          await presence(msg.channel!);
         }
       }
     } catch (e) {
       req.log.warn(e, 'mensaje WebSocket inválido');
     }
   });
-  socket.on('close', () => hub.drop(socket));
+  socket.on('close', () => {
+    // Un usuario con otra pestaña abierta sigue en la lista mientras le quede un socket
+    for (const channel of hub.drop(socket)) void presence(channel);
+  });
 });
 
 const close = async () => {
